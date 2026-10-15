@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A minimal platform window theme.
+
+      All real styling lives in Compose (`core:designsystem`) — there is no XML theme hierarchy here
+      on purpose. Compose draws every pixel, so an XML theme's only remaining job is the few frames
+      the platform renders *before* Compose attaches: the window background and the system bar colours.
+
+      `Theme.Material.Light.NoActionBar` (the platform theme, not a Material Components one) is used
+      deliberately: pulling in `com.google.android.material` just to name a theme would add an entire
+      XML-widget dependency to a Compose-only app, and Material Components' themes set colour
+      attributes that Compose then ignores.
+
+      `windowBackground` is transparent so the Compose surface shows through without a flash, and
+      `windowLightStatusBar` is intentionally left unset — `enableEdgeToEdge()` in MainActivity decides
+      bar appearance from the Compose theme, which is the only place that knows whether dark mode is on.
+    -->
+    <style name="Theme.NotDisk" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

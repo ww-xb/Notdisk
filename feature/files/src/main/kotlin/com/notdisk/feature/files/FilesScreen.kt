@@ -1,0 +1,1037 @@
+package com.notdisk.feature.files
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FolderOff
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.notdisk.core.database.settings.NotDiskSettingsStore
+import com.notdisk.core.designsystem.component.CloudFileGridTile
+import com.notdisk.core.designsystem.component.CloudFileListTile
+import com.notdisk.core.designsystem.component.ConfirmDialog
+import com.notdisk.core.designsystem.component.EmptyState
+import com.notdisk.core.designsystem.component.ErrorState
+import com.notdisk.core.designsystem.component.FilePathBreadcrumb
+import com.notdisk.core.designsystem.component.LoadingIndicatorRow
+import com.notdisk.core.designsystem.component.LoadingState
+import com.notdisk.core.designsystem.component.TextInputDialog
+import com.notdisk.core.designsystem.format.CloudDateTimeFormatter
+import com.notdisk.core.designsystem.format.FileSizeFormatter
+import com.notdisk.core.designsystem.theme.NotDiskTheme
+import com.notdisk.core.designsystem.theme.Dimens
+import com.notdisk.core.model.AccountId
+import com.notdisk.core.model.CapabilitySupport
+import com.notdisk.core.model.FileCapabilities
+import com.notdisk.core.model.FileId
+import com.notdisk.core.model.FileItem
+import com.notdisk.core.model.FileSort
+import com.notdisk.core.model.FileSortField
+import com.notdisk.core.model.FileType
+import com.notdisk.core.model.ProviderId
+
+/**
+ * The stateful entry point of the file browser.
+ *
+ * ### Why the screen is split into a route and a stateless composable
+ * [FilesScreen] takes a plain value and plain lambdas, so it can be rendered by a `@Preview`, by a
+ * screenshot test, and by a future host (search results, a shared-folder deep link) without a Hilt
+ * graph. This wrapper is the only place that mentions a `ViewModel` or lifecycle-aware collection,
+ * which is what keeps the screen a pure function of its state.
+ *
+ * ### Why navigation arrives as callbacks and not as a `NavController`
+ * `feature:files` must not know that a player or a preview screen exists — the app module owns the
+ * graph (see `NotDiskNavHost`). Exposing `(providerId, accountId, fileId)` as three strings is
+ * also exactly a `CloudFileKey`, i.e. the only file reference that stays valid across a process
+ * death; a serialised `FileItem` would drag a possibly-stale cached row through navigation.
+ *
+ * @param onOpenMedia invoked when the user asks to play a file the provider can stream.
+ * @param onOpenPreview invoked when the user asks to preview a file the provider can render inline.
+ */
+@Composable
+fun FilesRoute(
+    onOpenMedia: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: FilesViewModel = hiltViewModel(),
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    FilesScreen(
+        state = state,
+        onNavigateUp = viewModel::navigateUp,
+        onOpenFolder = viewModel::openFolder,
+        onNavigateToBreadcrumb = viewModel::navigateToBreadcrumb,
+        onRefresh = viewModel::refresh,
+        onLoadMore = viewModel::loadMore,
+        onCreateFolder = viewModel::createFolder,
+        onRename = viewModel::rename,
+        onDelete = viewModel::delete,
+        onSetSort = viewModel::setSort,
+        onToggleViewMode = viewModel::toggleViewMode,
+        onDismissError = viewModel::dismissError,
+        onOpenMedia = onOpenMedia,
+        onOpenPreview = onOpenPreview,
+        modifier = modifier,
+    )
+}
+
+/**
+ * The file browser: one folder's contents, in list or grid form, with only the actions the current
+ * provider actually supports.
+ *
+ * ### Why loading, empty and error are three separate branches
+ * They answer three different questions, and an app that renders one spinner or one "暂无数据" for
+ * all of them makes the user guess which situation they are in:
+ *  - **loading** — "is anything happening?" A labelled spinner. It replaces the list only on the
+ *    *first* load of a folder; a refresh keeps the rows visible, because blanking a list the user is
+ *    reading is a worse lie than showing it a moment out of date.
+ *  - **empty** — "is this normal?" A *successful* listing with no rows, with copy that names the
+ *    folder and offers the action that makes sense (新建文件夹, when the provider can create one).
+ *  - **error** — "what went wrong, and what now?" The provider's own user-facing message, a retry,
+ *    and the technical detail behind a disclosure.
+ * The three are mutually exclusive by construction, because [FilesUiState] cannot hold two of them
+ * at once.
+ *
+ * ### Why every affordance is capability-gated twice
+ * A control that cannot work teaches the user to distrust the whole screen. Each action must pass
+ * both gates: the *provider* must declare the capability `SUPPORTED` (via
+ * [FilesUiState.capabilities]), and the *item* must permit it (`FileCapabilities.canDelete == true`
+ * — `null` means "the provider did not say", which is not permission).
+ *
+ * @param state the complete screen state. This composable owns no state beyond which dialog, menu
+ *   or pending confirmation is open.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FilesScreen(
+    state: FilesUiState,
+    onNavigateUp: () -> Unit,
+    onOpenFolder: (FileItem) -> Unit,
+    onNavigateToBreadcrumb: (Int) -> Unit,
+    onRefresh: () -> Unit,
+    onLoadMore: () -> Unit,
+    onCreateFolder: (String) -> Unit,
+    onRename: (FileItem, String) -> Unit,
+    onDelete: (List<FileItem>) -> Unit,
+    onSetSort: (FileSortField, Boolean) -> Unit,
+    onToggleViewMode: () -> Unit,
+    onDismissError: () -> Unit,
+    onOpenMedia: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
+    modifier: Modifier = Modifier,
+    onSearchRequested: (() -> Unit)? = null,
+) {
+    var showCreateFolderDialog by rememberSaveable { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<FileItem?>(null) }
+    var deleteTargets by remember { mutableStateOf<List<FileItem>>(emptyList()) }
+    var detailsTarget by remember { mutableStateOf<FileItem?>(null) }
+    var sortMenuExpanded by rememberSaveable { mutableStateOf(false) }
+
+    val callbacks = remember(state.capabilities, state.providerId, state.accountId) {
+        FileItemCallbacks(
+            onOpen = { item ->
+                openItem(item, state, onOpenFolder, onOpenMedia, onOpenPreview) { detailsTarget = it }
+            },
+            onOpenMedia = { item -> onOpenMedia(item.providerId.value, item.accountId.value, item.id.value) },
+            onOpenPreview = { item -> onOpenPreview(item.providerId.value, item.accountId.value, item.id.value) },
+            onRename = { item -> renameTarget = item },
+            onDelete = { item -> deleteTargets = listOf(item) },
+            onDetails = { item -> detailsTarget = item },
+            capabilities = state.capabilities,
+        )
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = state.currentFolder?.name ?: "文件",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                navigationIcon = {
+                    // Rendered only when going up is possible. An always-present back arrow that
+                    // sometimes does nothing trains the user to stop trusting it.
+                    if (state.canGoUp) {
+                        IconButton(onClick = onNavigateUp) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "返回上一级",
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onRefresh, enabled = !state.isLoading && !state.isRefreshing) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
+                    }
+                    IconButton(onClick = onToggleViewMode) {
+                        val toGrid = state.viewMode == NotDiskSettingsStore.ViewMode.LIST
+                        Icon(
+                            imageVector = if (toGrid) Icons.Filled.GridView else Icons.AutoMirrored.Filled.ViewList,
+                            contentDescription = if (toGrid) "切换到网格视图" else "切换到列表视图",
+                        )
+                    }
+                    Box {
+                        IconButton(onClick = { sortMenuExpanded = true }) {
+                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+                        }
+                        SortMenu(
+                            expanded = sortMenuExpanded,
+                            current = state.sort,
+                            onDismiss = { sortMenuExpanded = false },
+                            onSelect = { field, ascending ->
+                                sortMenuExpanded = false
+                                onSetSort(field, ascending)
+                            },
+                        )
+                    }
+                    // Hidden entirely rather than disabled: a search that cannot run is not a
+                    // "currently unavailable" control, it is a provider that has no such endpoint.
+                    if (state.capabilities.canSearch && onSearchRequested != null) {
+                        IconButton(onClick = onSearchRequested) {
+                            Icon(Icons.Filled.Search, contentDescription = "搜索")
+                        }
+                    }
+                },
+            )
+        },
+        floatingActionButton = {
+            if (state.capabilities.canCreateFolder) {
+                FloatingActionButton(onClick = { showCreateFolderDialog = true }) {
+                    Icon(Icons.Filled.CreateNewFolder, contentDescription = "新建文件夹")
+                }
+            }
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            if (state.breadcrumb.isNotEmpty()) {
+                FilePathBreadcrumb(
+                    // `id to label`: the id is what navigation uses, the label is what the user
+                    // reads. The root's own name is "根目录" rather than an empty string.
+                    path = state.breadcrumb.map { it.id.value to it.name },
+                    onCrumbClick = { crumbId ->
+                        val index = state.breadcrumb.indexOfFirst { it.id.value == crumbId }
+                        if (index >= 0) onNavigateToBreadcrumb(index)
+                    },
+                )
+                HorizontalDivider(
+                    thickness = Dimens.Divider,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                )
+            }
+
+            // A refresh replaces neither the rows nor the breadcrumb, so without this the gesture
+            // would look like it did nothing at all until the list quietly changed. A determinate
+            // bar that is always composed (and simply transparent when idle) keeps the layout from
+            // jumping by 4dp every time a refresh starts.
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(Dimens.ProgressTrack),
+                color = if (state.isRefreshing) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    Color.Transparent
+                },
+                trackColor = Color.Transparent,
+            )
+
+            when {
+                state.isLoading && state.items.isEmpty() ->
+                    LoadingState(
+                        label = state.currentFolder?.name?.let { "正在读取「$it」…" } ?: "正在读取…",
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                state.error != null && state.items.isEmpty() ->
+                    ErrorState(
+                        userMessage = state.error,
+                        detail = state.errorDetail,
+                        onRetry = {
+                            onDismissError()
+                            onRefresh()
+                        },
+                        retryLabel = "重新加载",
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                state.isUnbound ->
+                    EmptyState(
+                        title = "尚未选择网盘账号",
+                        icon = Icons.Filled.FolderOff,
+                        description = "请先在「账号」页面添加并选择一个网盘账号，再回到这里浏览文件。",
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                state.items.isEmpty() ->
+                    EmptyState(
+                        title = "这个文件夹是空的",
+                        icon = Icons.Filled.FolderOff,
+                        description = buildString {
+                            append("「")
+                            append(state.currentFolder?.name ?: "当前文件夹")
+                            append("」中还没有任何内容。")
+                            if (state.capabilities.canCreateFolder) {
+                                append("你可以新建一个文件夹开始整理。")
+                            } else {
+                                append("请在对应的网盘 App 中上传文件后刷新。")
+                            }
+                        },
+                        actionLabel = if (state.capabilities.canCreateFolder) "新建文件夹" else null,
+                        onAction = if (state.capabilities.canCreateFolder) {
+                            { showCreateFolderDialog = true }
+                        } else {
+                            null
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                else -> FileContent(
+                    state = state,
+                    onLoadMore = onLoadMore,
+                    callbacks = callbacks,
+                )
+            }
+
+            // A failure while rows are already visible must not erase them: the user keeps their
+            // context and gets a dismissible explanation instead of losing their place.
+            if (state.error != null && state.items.isNotEmpty()) {
+                InlineFailure(
+                    message = state.error,
+                    detail = state.errorDetail,
+                    onDismiss = onDismissError,
+                    onRetry = {
+                        onDismissError()
+                        onRefresh()
+                    },
+                )
+            }
+        }
+    }
+
+    TextInputDialog(
+        title = "新建文件夹",
+        visible = showCreateFolderDialog,
+        onDismiss = { showCreateFolderDialog = false },
+        onConfirm = { name ->
+            showCreateFolderDialog = false
+            onCreateFolder(name)
+        },
+        label = "文件夹名称",
+        helperText = "名称随时可以修改；若网盘不允许某些字符，会由服务端拒绝并给出提示。",
+        confirmLabel = "创建",
+        enabled = !state.isMutating,
+    )
+
+    val renaming = renameTarget
+    TextInputDialog(
+        title = "重命名",
+        visible = renaming != null,
+        onDismiss = { renameTarget = null },
+        onConfirm = { newName ->
+            renaming?.let { onRename(it, newName) }
+            renameTarget = null
+        },
+        // Pre-filled *and* pre-selected by `TextInputDialog`, so typing replaces the old name
+        // instead of appending to it.
+        initialValue = renaming?.name.orEmpty(),
+        label = "新名称",
+        confirmLabel = "重命名",
+        enabled = !state.isMutating,
+    )
+
+    ConfirmDialog(
+        title = deleteTargets.singleOrNull()?.let { "删除「${it.name}」？" }
+            ?: "删除选中的 ${deleteTargets.size} 个项目？",
+        // The message states the real consequence. Promising a recycle bin for a provider that has
+        // none is a lie the user only discovers once the file is unrecoverable.
+        message = if (state.capabilities.deleteIsRecoverable) {
+            "该项目将被移入网盘的回收站，之后可以在回收站中恢复。"
+        } else {
+            "该网盘未声明回收站能力，删除后可能无法恢复，请确认。"
+        },
+        visible = deleteTargets.isNotEmpty(),
+        onDismiss = { deleteTargets = emptyList() },
+        onConfirm = {
+            onDelete(deleteTargets)
+            deleteTargets = emptyList()
+        },
+        confirmLabel = "删除",
+        destructive = true,
+    )
+
+    detailsTarget?.let { details ->
+        FileDetailsDialog(item = details, onDismiss = { detailsTarget = null })
+    }
+}
+
+/**
+ * The rows themselves, in whichever presentation the user chose.
+ *
+ * Split out of [FilesScreen] because the branch above answers *whether* there is content while this
+ * answers *what it looks like*; the two change for different reasons.
+ */
+@Composable
+private fun FileContent(
+    state: FilesUiState,
+    onLoadMore: () -> Unit,
+    callbacks: FileItemCallbacks,
+) {
+    when (state.viewMode) {
+        NotDiskSettingsStore.ViewMode.LIST -> LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            // Room for the FAB, so the last row is not permanently covered by it.
+            contentPadding = PaddingValues(bottom = Dimens.Huge),
+        ) {
+            items(items = state.items, key = { it.id.value }) { item ->
+                FileRow(item = item, callbacks = callbacks)
+            }
+            pagingFooter(state = state, onLoadMore = onLoadMore)
+        }
+
+        NotDiskSettingsStore.ViewMode.GRID -> LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = GRID_CELL_MIN_WIDTH),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(Dimens.Medium),
+            horizontalArrangement = Arrangement.spacedBy(Dimens.Medium),
+            verticalArrangement = Arrangement.spacedBy(Dimens.Medium),
+        ) {
+            items(items = state.items, key = { it.id.value }) { item ->
+                FileCell(item = item, callbacks = callbacks)
+            }
+            item(key = PAGING_FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) {
+                PagingFooter(state = state, onLoadMore = onLoadMore)
+            }
+        }
+    }
+}
+
+/**
+ * The last element of a list: a spinner while page N+1 is in flight, and the trigger that asks for
+ * it.
+ *
+ * ### Why the trigger is this element rather than a scroll listener
+ * `LazyColumn`/`LazyVerticalGrid` compose only what is near the viewport, so *being composed* is
+ * already the signal "the user reached the end" — and it fires once per cursor rather than once per
+ * scroll frame. That avoids a hand-rolled `derivedStateOf` over scroll positions (which is easy to
+ * get wrong at the boundary) and it cannot fire when the provider has said there is no next page,
+ * because the footer is not composed at all then.
+ */
+private fun LazyListScope.pagingFooter(
+    state: FilesUiState,
+    onLoadMore: () -> Unit,
+) {
+    if (state.isLoadingMore || state.canLoadMore) {
+        item(key = PAGING_FOOTER_KEY) {
+            PagingFooter(state = state, onLoadMore = onLoadMore)
+        }
+    }
+}
+
+/** The shared paging footer, used by both layouts. */
+@Composable
+private fun PagingFooter(state: FilesUiState, onLoadMore: () -> Unit) {
+    if (state.isLoadingMore) {
+        LoadingIndicatorRow()
+        return
+    }
+    if (state.canLoadMore) {
+        // Keyed on the cursor, so each page is requested exactly once even if the user scrolls away
+        // and back.
+        LaunchedEffect(state.nextCursor) { onLoadMore() }
+        LoadingIndicatorRow(label = "正在加载更多…")
+    }
+}
+
+/** One list row, with the per-item affordances the provider's capabilities allow. */
+@Composable
+private fun FileRow(item: FileItem, callbacks: FileItemCallbacks) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    CloudFileListTile(
+        name = item.name,
+        isFolder = item.isFolder,
+        onClick = { callbacks.onOpen(item) },
+        // Long-press *and* an explicit overflow button: the gesture alone is undiscoverable, and it
+        // is unreachable for a screen-reader user without the button.
+        onLongClick = { menuExpanded = true },
+        sizeText = item.size?.let(FileSizeFormatter::formatBytes),
+        subtitleText = FileTimestamp.subtitleFor(item),
+        mimeType = item.mimeType,
+        enabled = item.isSelectable(),
+        trailingContent = {
+            Box {
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "更多操作：${item.name}")
+                }
+                FileActionMenu(
+                    item = item,
+                    expanded = menuExpanded,
+                    callbacks = callbacks,
+                    onDismiss = { menuExpanded = false },
+                )
+            }
+        },
+    )
+}
+
+/** One grid cell. Grid mode trades the metadata line for a bigger thumbnail. */
+@Composable
+private fun FileCell(item: FileItem, callbacks: FileItemCallbacks) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Box {
+        CloudFileGridTile(
+            name = item.name,
+            isFolder = item.isFolder,
+            onClick = { callbacks.onOpen(item) },
+            onLongClick = { menuExpanded = true },
+            sizeText = item.size?.let(FileSizeFormatter::formatBytes),
+            mimeType = item.mimeType,
+            enabled = item.isSelectable(),
+            overlayContent = {
+                // The tile's own overlay slot is not a `BoxScope`, so the alignment is done here.
+                Box(modifier = Modifier.fillMaxSize()) {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.align(Alignment.TopEnd),
+                    ) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "更多操作：${item.name}")
+                    }
+                }
+            },
+        )
+        FileActionMenu(
+            item = item,
+            expanded = menuExpanded,
+            callbacks = callbacks,
+            onDismiss = { menuExpanded = false },
+        )
+    }
+}
+
+/**
+ * The per-item action menu.
+ *
+ * ### Why the entries are computed from capabilities rather than from the file type
+ * Two independent gates must both pass, and each catches a different real situation:
+ *  - the *provider* must offer the operation at all (a cloud whose API has no rename endpoint must
+ *    not show 重命名, and one that cannot stream must not show 播放);
+ *  - the *item* must permit it — a read-only shared file reports `canRename = false`, and `null`
+ *    means "the provider did not say", which is treated as "do not offer" rather than as consent.
+ * Showing an entry that fails either gate is how a user learns that this app's menus cannot be
+ * trusted.
+ */
+@Composable
+private fun FileActionMenu(
+    item: FileItem,
+    expanded: Boolean,
+    callbacks: FileItemCallbacks,
+    onDismiss: () -> Unit,
+) {
+    val capabilities = callbacks.capabilities
+
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        MenuAction("打开", Icons.Filled.Visibility) {
+            onDismiss()
+            callbacks.onOpen(item)
+        }
+
+        if (!item.isFolder && capabilities.canStream && item.capabilities.canStream == true) {
+            MenuAction("播放", Icons.Filled.PlayArrow) {
+                onDismiss()
+                callbacks.onOpenMedia(item)
+            }
+        }
+
+        if (!item.isFolder && capabilities.canPreview && item.capabilities.canPreview == true) {
+            MenuAction("预览", Icons.Filled.Visibility) {
+                onDismiss()
+                callbacks.onOpenPreview(item)
+            }
+        }
+
+        if (capabilities.canRename && item.capabilities.canRename == true) {
+            MenuAction("重命名", Icons.Filled.Edit) {
+                onDismiss()
+                callbacks.onRename(item)
+            }
+        }
+
+        if (capabilities.canDelete && item.capabilities.canDelete == true) {
+            MenuAction("删除", Icons.Filled.Delete) {
+                onDismiss()
+                callbacks.onDelete(item)
+            }
+        }
+
+        MenuAction("详情", Icons.Filled.Info) {
+            onDismiss()
+            callbacks.onDetails(item)
+        }
+    }
+}
+
+@Composable
+private fun MenuAction(label: String, icon: ImageVector, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        leadingIcon = { Icon(icon, contentDescription = null) },
+        onClick = onClick,
+    )
+}
+
+/** The sort menu, built from [FileSortField] so its choices cannot drift from the model. */
+@Composable
+private fun SortMenu(
+    expanded: Boolean,
+    current: FileSort,
+    onDismiss: () -> Unit,
+    onSelect: (FileSortField, Boolean) -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        FileSortField.entries.forEach { field ->
+            val selected = current.field == field
+            DropdownMenuItem(
+                text = { Text(field.chineseLabel() + if (selected) "  ✓" else "") },
+                onClick = {
+                    // Re-selecting the active field flips direction, which is what a user expects
+                    // from a sort menu that has no separate direction control.
+                    onSelect(field, if (selected) !current.ascending else true)
+                },
+            )
+        }
+    }
+}
+
+/** A compact failure strip shown *above* a populated list. */
+@Composable
+private fun InlineFailure(
+    message: String,
+    detail: String?,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(horizontal = Dimens.Large, vertical = Dimens.Small),
+        verticalArrangement = Arrangement.spacedBy(Dimens.XSmall),
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+        )
+        if (!detail.isNullOrBlank()) {
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(Dimens.Small)) {
+            TextButton(onClick = onRetry) { Text("重试") }
+            TextButton(onClick = onDismiss) { Text("忽略") }
+        }
+    }
+}
+
+/** A read-only details panel. Nothing is editable here, so it is a dialog and not a screen. */
+@Composable
+private fun FileDetailsDialog(item: FileItem, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Dimens.XSmall)) {
+                DetailLine("类型", if (item.isFolder) "文件夹" else item.extension?.uppercase() ?: "文件")
+                DetailLine("大小", item.size?.let(FileSizeFormatter::formatBytes) ?: "未提供")
+                DetailLine("创建时间", CloudDateTimeFormatter.formatAbsolute(item.createdTime))
+                DetailLine("修改时间", CloudDateTimeFormatter.formatAbsolute(item.modifiedTime))
+                DetailLine("网盘", item.providerId.value)
+                DetailLine("文件 ID", item.id.value)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+private fun DetailLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.Medium),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(DETAIL_LABEL_WIDTH),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+/** The per-item callbacks, bundled so both layouts share one signature. */
+private data class FileItemCallbacks(
+    val onOpen: (FileItem) -> Unit,
+    val onOpenMedia: (FileItem) -> Unit,
+    val onOpenPreview: (FileItem) -> Unit,
+    val onRename: (FileItem) -> Unit,
+    val onDelete: (FileItem) -> Unit,
+    val onDetails: (FileItem) -> Unit,
+    val capabilities: FileActionAvailability,
+)
+
+/**
+ * Whether the user may interact with this item at all.
+ *
+ * A provider can report an item as blocked (moderation, a share that was revoked, a file in a
+ * read-only mount). `FileCapabilities.isBlocked` is nullable, and `null` means "not reported",
+ * which is *not* the same as blocked — treating an unreported flag as blocked would grey out every
+ * row on a provider that simply does not populate it.
+ */
+private fun FileItem.isSelectable(): Boolean = capabilities.isBlocked != true
+
+/**
+ * What a tap on a row means.
+ *
+ * A folder navigates; a playable file plays; a previewable file previews; anything else opens its
+ * details, because a tap that does *nothing* reads as a broken screen. The order matters: playing
+ * beats previewing for media, since a video's "preview" is playback anyway.
+ */
+private fun openItem(
+    item: FileItem,
+    state: FilesUiState,
+    onOpenFolder: (FileItem) -> Unit,
+    onOpenMedia: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onDetails: (FileItem) -> Unit,
+) {
+    when {
+        item.isFolder -> onOpenFolder(item)
+
+        item.isSelectable() && state.capabilities.canStream && item.capabilities.canStream == true ->
+            onOpenMedia(item.providerId.value, item.accountId.value, item.id.value)
+
+        item.isSelectable() && state.capabilities.canPreview && item.capabilities.canPreview == true ->
+            onOpenPreview(item.providerId.value, item.accountId.value, item.id.value)
+
+        else -> onDetails(item)
+    }
+}
+
+/** Chinese labels for the sort fields. Here, not on the enum: `core:model` carries no UI text. */
+private fun FileSortField.chineseLabel(): String = when (this) {
+    FileSortField.NAME -> "按名称"
+    FileSortField.MODIFIED_TIME -> "按修改时间"
+    FileSortField.CREATED_TIME -> "按创建时间"
+    FileSortField.SIZE -> "按大小"
+    FileSortField.TYPE -> "按类型"
+}
+
+/**
+ * The one-line timestamp a row shows.
+ *
+ * The relative ladder from [CloudDateTimeFormatter] answers "is this the version I just uploaded?"
+ * far better than an absolute date — but "3 分钟前" is useless when comparing a folder against a
+ * backup, so a folder shows its exact modification date instead.
+ */
+private object FileTimestamp {
+    fun subtitleFor(item: FileItem): String? {
+        val modified = item.modifiedTime ?: return null
+        return if (item.isFolder) {
+            CloudDateTimeFormatter.formatDate(modified)
+        } else {
+            CloudDateTimeFormatter.format(modified)
+        }
+    }
+}
+
+/** One key for the single synthetic footer, so Compose can reuse it across recompositions. */
+private const val PAGING_FOOTER_KEY = "paging-footer"
+
+/** Grid cells are at least this wide; `Adaptive` then fits 2–4 columns on a phone. */
+private val GRID_CELL_MIN_WIDTH = 108.dp
+
+private val DETAIL_LABEL_WIDTH = 72.dp
+
+/** Unused-import guard keeping [FileCapabilities] documented as part of the item contract. */
+@Suppress("unused")
+private val fileCapabilitiesDoc: FileCapabilities = FileCapabilities.Unknown
+
+/** Unused-import guard keeping [FileType] documented as the folder/file discriminator. */
+@Suppress("unused")
+private val fileTypeDoc: FileType = FileType.FILE
+
+// ---------------------------------------------------------------------------- previews
+
+/**
+ * A fake state for the previews below and for screenshot tooling.
+ *
+ * A function rather than a constant so a caller can vary exactly one field. The rows are chosen to
+ * make every branch reachable: a folder, a streamable file, a preview-only file, and a file whose
+ * size the provider did not report.
+ */
+private fun previewState(
+    items: List<FileItem> = previewItems(),
+    isLoading: Boolean = false,
+    error: String? = null,
+) = FilesUiState(
+    providerId = ProviderId("mock"),
+    accountId = AccountId("preview-account"),
+    breadcrumb = listOf(
+        previewFolder(id = "root", name = "根目录"),
+        previewFolder(id = "media", name = "媒体"),
+    ),
+    items = items,
+    isLoading = isLoading,
+    error = error,
+    errorDetail = error?.let { "ServerError · HTTP 502 · code=UPSTREAM" },
+    capabilities = FileActionAvailability(
+        createFolder = CapabilitySupport.SUPPORTED,
+        rename = CapabilitySupport.SUPPORTED,
+        delete = CapabilitySupport.SUPPORTED,
+        search = CapabilitySupport.UNVERIFIED,
+        trash = CapabilitySupport.SUPPORTED,
+        stream = CapabilitySupport.SUPPORTED,
+        preview = CapabilitySupport.SUPPORTED,
+    ),
+    providerDisplayName = "离线演示网盘 (Mock)",
+    accountDisplayName = "Mock 用户",
+)
+
+private fun previewFolder(id: String, name: String) = FileItem(
+    id = FileId(id),
+    providerId = ProviderId("mock"),
+    accountId = AccountId("preview-account"),
+    name = name,
+    type = FileType.FOLDER,
+    modifiedTime = 1_700_000_000_000L,
+    capabilities = FileCapabilities(canRename = true, canDelete = true),
+)
+
+private fun previewItems(): List<FileItem> = listOf(
+    previewFolder(id = "sub", name = "电视剧"),
+    previewFile(
+        id = "video",
+        name = "sample-1080p.mp4",
+        size = 1_036_870_843L,
+        extension = "mp4",
+        mimeType = "video/mp4",
+        canStream = true,
+        canPreview = true,
+    ),
+    previewFile(
+        id = "image",
+        name = "shot.jpg",
+        size = 3_500_000L,
+        extension = "jpg",
+        mimeType = "image/jpeg",
+        canStream = false,
+        canPreview = true,
+    ),
+    previewFile(
+        id = "unknown-size",
+        name = "data.bin",
+        size = null,
+        extension = "bin",
+        mimeType = "application/octet-stream",
+        canStream = false,
+        canPreview = false,
+    ),
+)
+
+private fun previewFile(
+    id: String,
+    name: String,
+    size: Long?,
+    extension: String,
+    mimeType: String,
+    canStream: Boolean,
+    canPreview: Boolean,
+) = FileItem(
+    id = FileId(id),
+    providerId = ProviderId("mock"),
+    accountId = AccountId("preview-account"),
+    name = name,
+    type = FileType.FILE,
+    mimeType = mimeType,
+    extension = extension,
+    size = size,
+    modifiedTime = 1_700_000_000_000L,
+    capabilities = FileCapabilities(
+        canStream = canStream,
+        canPreview = canPreview,
+        canRename = true,
+        canDelete = true,
+    ),
+)
+
+/** The populated list view. */
+@Preview(name = "文件列表 (列表视图)", showBackground = true)
+@Composable
+private fun FilesScreenListPreview() {
+    NotDiskTheme(dynamicColor = false) {
+        FilesScreen(
+            state = previewState(),
+            onNavigateUp = {},
+            onOpenFolder = {},
+            onNavigateToBreadcrumb = {},
+            onRefresh = {},
+            onLoadMore = {},
+            onCreateFolder = {},
+            onRename = { _, _ -> },
+            onDelete = {},
+            onSetSort = { _, _ -> },
+            onToggleViewMode = {},
+            onDismissError = {},
+            onOpenMedia = { _, _, _ -> },
+            onOpenPreview = { _, _, _ -> },
+        )
+    }
+}
+
+/** The grid view, same state, different presentation. */
+@Preview(name = "文件列表 (网格视图)", showBackground = true)
+@Composable
+private fun FilesScreenGridPreview() {
+    NotDiskTheme(dynamicColor = false) {
+        FilesScreen(
+            state = previewState().copy(viewMode = NotDiskSettingsStore.ViewMode.GRID),
+            onNavigateUp = {},
+            onOpenFolder = {},
+            onNavigateToBreadcrumb = {},
+            onRefresh = {},
+            onLoadMore = {},
+            onCreateFolder = {},
+            onRename = { _, _ -> },
+            onDelete = {},
+            onSetSort = { _, _ -> },
+            onToggleViewMode = {},
+            onDismissError = {},
+            onOpenMedia = { _, _, _ -> },
+            onOpenPreview = { _, _, _ -> },
+        )
+    }
+}
+
+/** The empty folder — reachable, and visibly different from both loading and failure. */
+@Preview(name = "空文件夹", showBackground = true)
+@Composable
+private fun FilesScreenEmptyPreview() {
+    NotDiskTheme(dynamicColor = false) {
+        FilesScreen(
+            state = previewState(items = emptyList()),
+            onNavigateUp = {},
+            onOpenFolder = {},
+            onNavigateToBreadcrumb = {},
+            onRefresh = {},
+            onLoadMore = {},
+            onCreateFolder = {},
+            onRename = { _, _ -> },
+            onDelete = {},
+            onSetSort = { _, _ -> },
+            onToggleViewMode = {},
+            onDismissError = {},
+            onOpenMedia = { _, _, _ -> },
+            onOpenPreview = { _, _, _ -> },
+        )
+    }
+}
+
+/** The failure state, which must not be mistakable for "empty". */
+@Preview(name = "加载失败", showBackground = true)
+@Composable
+private fun FilesScreenErrorPreview() {
+    NotDiskTheme(dynamicColor = false) {
+        FilesScreen(
+            state = previewState(items = emptyList(), error = "没有权限访问「无权限目录」"),
+            onNavigateUp = {},
+            onOpenFolder = {},
+            onNavigateToBreadcrumb = {},
+            onRefresh = {},
+            onLoadMore = {},
+            onCreateFolder = {},
+            onRename = { _, _ -> },
+            onDelete = {},
+            onSetSort = { _, _ -> },
+            onToggleViewMode = {},
+            onDismissError = {},
+            onOpenMedia = { _, _, _ -> },
+            onOpenPreview = { _, _, _ -> },
+        )
+    }
+}

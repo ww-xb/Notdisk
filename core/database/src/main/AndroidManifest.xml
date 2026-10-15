@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  No permissions or components: this module only owns the local Room schema and the
+  account/settings stores. Keeping it component-free means it cannot accidentally acquire a
+  network or storage permission because of a refactor.
+-->
+<manifest />

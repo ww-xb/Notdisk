@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The transport layer's own manifest.
+
+  `ACCESS_NETWORK_STATE` is declared here — rather than only in the app module — because it is
+  `AndroidNetworkMonitor` that needs it: without the permission, `registerNetworkCallback` throws a
+  `SecurityException` and `getNetworkCapabilities` cannot be queried, so connectivity would be
+  unobservable. Declaring it next to the code that consumes it makes the dependency explicit and
+  keeps the app manifest from having to know about this module's internals; the manifest merger
+  unions it into the final APK.
+
+  It is a normal (install-time) permission, so it adds no runtime prompt. `INTERNET` is deliberately
+  NOT declared here: opening sockets is the app's decision, and a library that grants itself network
+  access silently is a security smell.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+</manifest>

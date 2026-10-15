@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      The only two permissions this app needs.
+
+      INTERNET            - talking to the cloud provider the user bound.
+      ACCESS_NETWORK_STATE - distinguishing "no connection" from "the server refused", which the
+                             unified error model reports as different, actionable states.
+
+      Deliberately absent: READ/WRITE_EXTERNAL_STORAGE (the app uses the Storage Access Framework, so
+      it never needs broad file access), and any permission that would let it read the user's media
+      library. Nothing here is requested speculatively.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:name=".NotDiskApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NotDisk"
+        tools:targetApi="34"
+        xmlns:tools="http://schemas.android.com/tools">
+
+        <!--
+          allowBackup is false on purpose. The app stores account identifiers and encrypted
+          credentials; an automatic backup would move them to another device outside the Keystore that
+          protects them, which is exactly the property the encrypted store exists to provide.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.NotDisk">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

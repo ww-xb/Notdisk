@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple cloud-with-drive glyph drawn as a vector, so the project needs no binary assets. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,66h34a12,12 0 0,0 1.5,-23.9A17,17 0 0,0 40.2,38 13,13 0 0,0 38,66z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,72h28v10H40z" />
+</vector>

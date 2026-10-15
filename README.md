@@ -3,7 +3,8 @@
 一个 Kotlin + Jetpack Compose 的 Android 网盘聚合客户端。通过统一的 Provider 抽象把不同网盘的
 API 封装成同一套文件系统、媒体播放与文件预览能力。
 
-**首个真实接入：115 网盘**（依据对 115.com 网页版的实测抓取文档）。
+**已接入：115 网盘**（依据对 115.com 网页版的实测抓取文档）、**百度网盘**
+（依据对 pan.baidu.com 网页版的实测抓取文档）。
 
 [![CI](https://github.com/ww-xb/Notdisk/actions/workflows/ci.yml/badge.svg)](https://github.com/ww-xb/Notdisk/actions/workflows/ci.yml)
 
@@ -14,11 +15,13 @@ API 封装成同一套文件系统、媒体播放与文件预览能力。
 | 维度 | 状态 |
 |---|---|
 | 工程可构建 | ✅ `./gradlew build` → `app-debug.apk`（实测 75.4–76.4 MB，同一提交的连续构建会有浮动；debug + release 双变体） |
-| 自动化测试 | ✅ **402 个测试全绿，0 失败**（含 Robolectric Compose 页面测试） |
+| 自动化测试 | ✅ **854 个测试全绿，0 失败**（含 Robolectric Compose 页面测试） |
 | 115 接入 | ✅ 22 个端点已实现并测试；3 项刻意未实现（见下） |
-| **真实账号联调** | ❌ **未进行** —— 开发环境没有 115 账号与开发者凭据 |
+| **百度网盘接入** | ✅ 10 个端点已实现并测试；97 个测试；下载/上传/分享按能力声明拒绝 |
+| **真实账号联调** | ❌ **未进行** —— 开发环境没有 115 / 百度账号与开发者凭据 |
 | OAuth 登录 | ⏸ 需要开发者 `app_id`，入口已就绪，**未伪造任何凭据** |
-| 上传 / 分享 | ⏸ 文档依据仅为前端源码（`📖`），**刻意不实现** |
+| 百度扫码登录 | ⏸ 最后一步需要 Passport 私有 JS 计算的 `sig`，**整个流程**因此不声明（见 `docs/baidu-api-mapping.md` §1.2） |
+| 上传 / 分享 | ⏸ 文档依据仅为前端源码或推断（`📖`/`⚠️`），**刻意不实现** |
 
 「未进行真实联调」不等于「不可用」：所有 ✅ 项都有完整的请求构造、响应解析、错误映射与自动化测试，
 测试用的是抓取文档附录里**逐字记录的响应体**。缺的是最后一步真机验证，清单见
@@ -55,11 +58,14 @@ API 封装成同一套文件系统、媒体播放与文件预览能力。
 绑定的真实网盘，不存在「看起来能用但其实是假数据」的路径。
 
 1. 启动后进入「文件」页，此时还没有账号，页面会说明并给出「去绑定账号」入口；
-2. 「设置 → 账号」中可添加 115 账号，两种方式都**不需要开发者凭据**：
-   - **扫码登录**：用 115 App 扫描屏幕上的二维码；
-   - **Cookie 登录**：浏览器登录 115 后，从开发者工具复制 `Cookie` 请求头粘贴进来
-     （需要包含 `UID`/`CID`/`SEID`/`KID`）。粘贴的凭据会先向 115 校验，通过后才写入
-     本机加密存储（Android Keystore），因此失效的 Cookie 不会留下一个「看似已绑定」的账号。
+2. 「设置 → 账号」中可添加网盘账号，两个 Provider 的登录方式都**不需要开发者凭据**：
+   - **115 扫码登录**：用 115 App 扫描屏幕上的二维码；
+   - **115 Cookie 登录**：浏览器登录 115 后，从开发者工具复制 `Cookie` 请求头粘贴进来
+     （需要包含 `UID`/`CID`/`SEID`/`KID`）；
+   - **百度网盘 Cookie 登录**：浏览器登录百度网盘后，从开发者工具复制 `Cookie` 请求头粘贴进来
+     （需要包含 `BDUSS`；`STOKEN` 与设备 Cookie 会被一并保留）。
+   粘贴的凭据都会**先向厂商校验、通过后才**写入本机加密存储（Android Keystore），
+   因此失效的 Cookie 不会留下一个「看似已绑定」的账号。
 3. 「设置」页可查看每个网盘的**能力声明**（哪些功能已实现、哪些未验证、哪些不支持）。
 
 ### 首页的三种形态
@@ -170,14 +176,16 @@ rid[0]=…&rid[1]=…      // rb/revert / rb/clean
 ./gradlew test
 ```
 
-402 个测试 = 纯 JVM 模块 144 个 + Android 模块 258 个（Android 模块的 debug 与 release 变体各跑一遍，用于双倍确认）。
+854 个测试 = 纯 JVM 模块 + Android 模块（Android 模块的 debug 与 release 变体各跑一遍，用于双倍确认）。
+其中 **97 个属于 `provider:baidu`**（29 条共享契约规则 + 48 条 HTTP 层 + 12 条 Cookie 解析 + 8 条标识编解码）。
 
 | 层次 | 位置 | 作用 |
 |---|---|---|
-| **共享契约测试** | `core:provider-testing` | 29 条规则，**所有 Provider 共用** |
+| **共享契约测试** | `core:provider-testing` | 29 条规则，**所有 Provider 共用**（115 与百度各跑一遍） |
 | **Compose 页面测试** | `feature/*/src/test`（Robolectric） | 状态分支可区分、无预览时有出路 |
-| Provider 行为测试 | `provider:p115/src/test` | 用抓取文档中逐字记录的响应体验证分页/错误码/认证流程 |
-| Provider HTTP 测试 | `provider:p115/src/test` | 用**录制的真实响应体**验证映射与参数 |
+| Provider 行为测试 | `provider:p115/src/test`, `provider:baidu/src/test` | 用抓取文档中逐字记录的响应体验证分页/错误码/认证流程 |
+| Provider HTTP 测试 | `provider:p115/src/test`, `provider:baidu/src/test` | 用**录制的真实响应体**验证映射与参数 |
+| 百度专有行为测试 | `provider:baidu/src/test` | `errno === 0` 才成功、缺失 `errno` 折算 `-1`、`info[]`/`list[]` 双拼写、元素级 `errno`、64 位 `taskid` 精度、两阶段播放握手、签名 URL 不泄露 |
 | UseCase 测试 | `core/domain/src/test` | 144 个测试，含「游标不前进」等边界 |
 | 架构守护测试 | `feature:player/src/test` | 断言播放器模块**没有** Provider 依赖 |
 

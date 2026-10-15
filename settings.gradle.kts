@@ -58,6 +58,7 @@ include(":core:designsystem")
 
 // ---- Providers ----
 include(":provider:p115")
+include(":provider:baidu")
 
 // ---- Features ----
 include(":feature:accounts")

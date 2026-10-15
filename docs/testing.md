@@ -9,7 +9,7 @@
 | 层 | 位置 | 依赖 | 目的 |
 |---|---|---|---|
 | **共享契约测试** | `core:provider-testing` | 无 | 一套 29 条规则，**所有** Provider 共用，保证抽象不被某一家网盘带偏 |
-| **Provider HTTP / 行为测试** | `provider:p115/src/test` | MockWebServer | 用**录制的真实响应体**验证 DTO 映射、请求参数、错误码、分页游标与认证流程 |
+| **Provider HTTP / 行为测试** | `provider:p115/src/test`, `provider:baidu/src/test` | MockWebServer | 用**录制的真实响应体**验证 DTO 映射、请求参数、错误码、分页游标与认证流程 |
 | **单元测试** | `core:designsystem/src/test` 等 | 无 | 纯函数（格式化器等） |
 | **Compose UI 测试** | `feature/*/src/test` | Robolectric（JVM） | 关键页面的状态分支（见 §5.3） |
 
@@ -79,7 +79,7 @@ class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build
 
 ---
 
-## 3. 115 Provider 的 HTTP 测试
+## 3. Provider 的 HTTP 测试
 
 `provider/p115/src/test/.../P115ProviderHttpTest.kt`（35 个测试）对本地 `MockWebServer` 驱动真实 Provider。
 
@@ -121,7 +121,40 @@ class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build
 | `capabilities declare the documented and the unverified accurately` | §15.4：未验证项不得声明为支持 |
 | `upload / share / permanent delete returns a typed unsupported result and sends nothing` | 声明为 `UNVERIFIED`/`UNSUPPORTED` 的操作**不发请求** |
 
-### 3.4 测试基础设施中的两个坑（已修）
+### 3.4 百度网盘专有行为（`provider:baidu`）
+
+百度与 115 在**信封语义**上的差异比在文件系统上更大，因此这一组测试针对的是协议细节而非功能：
+
+| 测试 | 依据 |
+|---|---|
+| `a 200 response with a non zero errno is a failure` | §0.3：厂商拦截器判 `0 !== errno`，HTTP 状态**不是**失败信号 |
+| `an envelope with no code at all is not treated as success` | §0.3：`if (isNaN(i)) i = -1` —— 缺码必须折算为失败，**不能**回退到 HTTP 200 |
+| `an empty string errno is not coerced into success` | §1.3：真实响应里有 `"errno":""`，而 JS 中 `Number("") === 0` |
+| `error_code is accepted as the success field` | §9.3：`/rest/2.0/membership/…` 用 `error_code` 而非 `errno` |
+| `errno minus six is reported as an expired session` | §1.3：`-6` 是唯一的重新登录触发码 |
+| `the category listing is read from the info array` | §3.3：`/api/categorylist` 返回 `info[]`，`/api/list` 返回 `list[]` |
+| `an element level error inside a successful envelope is honoured` | §3.5：外层 `errno 12` + 元素级 `-9`，必须读元素级 |
+| `an asynchronous taskid survives as an exact 64 bit value` | §0.3：厂商自己用正则从原始文本重取 `task_id` 以避开 53 位浮点 |
+| `risk control verification is a distinct typed outcome` | §3.6：`errno 132` 带 `authwidget`，是「需要身份验证」而非权限不足 |
+| `a partial batch reports the failed item rather than a blanket success` | §3.6：`info[]` 的逐项 `errno` |
+| `bdstoken and opera stay in the query rather than the body` | §3.6：`filelist` 里不得含这两个字段 |
+| `the recycle list uses the trailing slash endpoint` | §3.10：`"".concat("/api/recycle/list", "/")` |
+| `restore reports per item outcomes from faillist` | §3.10：`faillist` 是失败清单 |
+| `the streaming ad handshake is completed and yields an hls resource` | §7.3：`errno 133` 是握手第一步，不是失败 |
+| `an unavailable rendition is reported honestly` | §7.3：档位不可用返回 `errno 2` |
+| `the playlist carries the documented renditions` | §7.3.1：最高 1080P，**2160 不得被提供** |
+| `playback progress reporting fails closed` | §7：进度只存在于厂商 `localStorage`，无上报端点 |
+| `a cookie that is not logged in is rejected` | §2.4：`loginStatus` 对未登录返回**成功信封** + `isLogin:0` |
+| `a cookie without bduss is rejected as invalid input` | §1.5：`BDUSS` 是唯一主令牌，缺项不得写入残缺凭据 |
+| `a pasted cookie is verified before it is persisted` | 顺序要求：先校验、后写入 |
+| `re-binding the same account reuses its local id` | 去重键是**校验后的**厂商用户 id，不是粘贴内容 |
+| `signed urls never leak into the file model` | §8.2：`thumbs`/`docpreview` 是短时效凭据，而 `FileItem` 会被缓存 |
+| `thumbnail returns absence rather than a signed url` | 同上；「没有缩略图」是成功 + `null`，不是错误 |
+| `office documents classify without a fabricated viewer` | §8.4：`/disk/docview` 需要独立 OAuth 授权，不得伪造 viewer |
+| `the capability declaration matches the documented boundaries` | 逐项固定 `SUPPORTED`/`UNVERIFIED`/`UNSUPPORTED` 的边界 |
+| `permanent delete is refused and names the narrower capability` | §3.10：彻底删除是另一个端点，不得静默降级 |
+
+### 3.5 测试基础设施中的三个坑（已修）
 
 1. **测试曾经打到真实 115 服务器。**
    `P115HttpClient.resolve()` 用**完整 URL** 去查 host 覆盖表，而表是按**主机名**索引的，因此覆盖从未生效。真实服务器返回了 `990001 登录超时`，测试「看起来在跑」但毫无意义。
@@ -130,6 +163,12 @@ class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build
 2. **测试曾经永久挂起。**
    MockWebServer 的默认行为是队列为空时**阻塞**客户端。一个漏掉的 `enqueue` 会变成数分钟挂起，掩盖真正的 bug。
    → 改为「队列为空立即返回 500」的 dispatcher，把挂起变成有名有姓的失败。
+
+3. **测试曾经依赖请求的先后顺序（百度）**。
+   写操作会先取一次 `bdstoken`（§2.4），因此「重命名请求是第几个」并不固定。
+   用位置 `takeRequest()` 断言会让测试在「多了一次无关的令牌请求」时失败 —— 一个与被测性质无关的假信号。
+   → 改为按**路径内容**取请求（`takeRequestMatching { it.contains("opera=rename") }`），并给它一个小的排空上限，
+   让「请求缺失」快速失败而不是挂起。
 
 ---
 
@@ -160,10 +199,11 @@ cd <项目根目录>
 gradle clean build --console=plain
 ```
 
-结果：**BUILD SUCCESSFUL**，`app-debug.apk` 产出（实测 75,355,607–76,363,289 bytes —— 同一提交的
-连续构建之间会有浮动，因此这里给区间而不是单值；`applicationId = com.notdisk.app`，
-`versionName = 0.2.0` / `versionCode = 2`，读取自 AGP 生成的 `output-metadata.json`，非猜测）。
-`build` 同时跑了 debug 与 release 两个变体。
+结果：**BUILD SUCCESSFUL**，`app-debug.apk` 产出（`applicationId = com.notdisk.app`，
+版本号读取自 AGP 生成的 `output-metadata.json`，非猜测）。`build` 同时跑了 debug 与 release 两个变体。
+
+> `./gradlew test --rerun-tasks` 的实测总数（含 Android 模块的 debug + release 双变体，
+> **未按上表去重**）为 **854 个测试、0 失败**。上表按「每个测试计一次」统计。
 
 发布产物 `v0.2.0` 的 APK 实测 75,355,607 bytes，SHA-256
 `951bc2b19af2b733527c22f5d55402e7470aae796bf05102ecd66ecacb25948a`，与 Release notes 中记录的
@@ -175,6 +215,7 @@ gradle clean build --console=plain
 |---|---|---|
 | `core:domain`（UseCase，含游标不前进等边界） | 144 | 0 |
 | `provider:p115`（共享契约 29 + HTTP 35 + **Cookie 解析 10**） | 74 | 0 |
+| `provider:baidu`（共享契约 29 + HTTP 48 + **Cookie 解析 12** + **标识编解码 8**） | 97 | 0 |
 | `core:network`（超时/取消/重试/脱敏） | 33 | 0 |
 | `feature:player`（错误映射 + 刷新上限 + **架构隔离守卫**） | 32 | 0 |
 | `core:designsystem`（格式化器） | 28 | 0 |
@@ -183,7 +224,7 @@ gradle clean build --console=plain
 | `feature:settings`（**Compose 能力矩阵** + **账号摘要**） | 8 | 0 |
 | `feature:accounts`（**Compose 授权状态**） | 7 | 0 |
 | `feature:preview`（**Compose 预览分支**） | 7 | 0 |
-| **合计** | **402** | **0** |
+| **合计** | **499** | **0** |
 
 > 说明：Android 模块的 `build` 会同时跑 `testDebugUnitTest` 与 `testReleaseUnitTest`，
 > 因此上表按 **debug 变体 + JVM 模块的 `test`** 去重统计，每个测试恰好计一次
@@ -307,10 +348,12 @@ gradle test --console=plain
 
 # 单个模块
 gradle :provider:p115:testDebugUnitTest --console=plain
+gradle :provider:baidu:testDebugUnitTest --console=plain
 gradle :core:domain:test --console=plain
 
 # 只跑共享契约规则
 gradle :provider:p115:testDebugUnitTest --tests '*ProviderContractTest' --console=plain
+gradle :provider:baidu:testDebugUnitTest --tests '*ProviderContractTest' --console=plain
 
 # 调试单个规则
 gradle :provider:p115:testDebugUnitTest \

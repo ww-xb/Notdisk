@@ -213,6 +213,25 @@ interface ProviderContractFixture {
 | Provider | 模块 | id | 认证 | 状态 |
 |---|---|---|---|---|
 | 115 网盘 | `provider:p115` | `p115` | `QR_CODE` / `MANUAL_CREDENTIAL`（粘贴会话 Cookie）；均无需开发者凭据 | 22 个端点已实现并测试；3 项刻意未实现；真实联调待做 |
+| 百度网盘 | `provider:baidu` | `baidu` | `MANUAL_CREDENTIAL`（粘贴浏览器 `Cookie`）；**不需要任何开发者凭据** | 10 个端点已实现并测试；下载/上传/分享按能力声明拒绝；真实联调待做。见 [`baidu-api-mapping.md`](baidu-api-mapping.md) |
+
+### 6.2 两个 Provider 在同一个契约下的差异，以及为什么这些差异是允许的
+
+`provider:baidu` 是「新增网盘不修改公共流程」这条约束的第一次实战检验：
+它**没有**改动任何公共抽象、任何 UI、任何播放器代码，也没有引入 `when (providerId)`。
+注册只发生在它自己的 Hilt 模块里。
+
+但两个 Provider 在同一套契约下的实现差别很大，这些差别值得记录，因为它们说明
+**契约抽象的是行为，不是协议**：
+
+| 维度 | `provider:p115` | `provider:baidu` | 契约是否允许 |
+|---|---|---|---|
+| 文件标识 | `cid`/`fid`（厂商数字 id） | **绝对路径**（因为百度按路径寻址） | ✅ `FileId` 是不透明句柄 |
+| 取路径 | 一次 `category/get`，或最多 32 层父目录遍历 | **零请求**，由 id 直接推导 | ✅ `getPath` 只要求「根在前、名称非空」 |
+| 分页 | `offset` + `limit`，有 `count` | `page` + `num`，**无**「还有下一页」字段 | ✅ 终止判定用实际返回条数 |
+| 播放鉴权头 | 需要 `Referer`/`Origin`/`UA` | **不需要**（分片 URL 自带签名） | ✅ `headers` 是数据 |
+| 多音轨 | 有独立 `audio/{N}.m3u8` | 走 dlink，未接入 | ✅ 能力声明为 `UNSUPPORTED` |
+| 下载 | ✅ 直链 | ⏸ 签名需内嵌 JS 引擎 | ✅ 能力声明为 `UNSUPPORTED` |
 
 **此前的 `provider:mock`（`mock`）已整体删除**（目录 `provider/mock/` 与 `settings.gradle.kts`
 的 `include(...)` 均已移除）。它曾是一个纯离线参考实现，能跑通同一套契约；但一个 Provider 若要

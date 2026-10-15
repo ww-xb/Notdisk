@@ -44,7 +44,7 @@
                     ▲                              ▲
                     │                              │
             provider:p115 ─────────────────────────┘
-            (真实接入)
+            provider:baidu  (真实接入)
                     │
                     ▼
                core:common   (CloudResult / CloudError / CloudLogger)
@@ -54,7 +54,9 @@
 
 - **`core:domain` 是纯 Kotlin JVM 模块**，不是 Android 模块。它编译不过任何 Android API，这在编译期就杜绝了「Domain 层偷偷用 Context」。
 - **`core:designsystem` 不依赖 `core:model`**。它接收原始类型（字符串、布尔、尺寸）而不是 `FileItem`，因此 UI 组件无法知道「文件来自哪个网盘」。
-- **Provider 只有一个**：`provider:p115`。此前的 `provider:mock`（`mock`）模块已**整体删除**，`settings.gradle.kts` 中的 `include(...)` 也已移除。删除原因不是它无用，而是它会在 APK 内伪造账号与文件：一个能凭空造出账号与文件列表的 Provider 一旦进入 release 构建，就存在被真实用户当成真实数据的风险。公共契约与平台无关这一点，现在由 `provider:p115` 接入 `core:provider-testing` 的共享规则来检验。
+- **Provider 有两个**：`provider:p115` 与 `provider:baidu`。此前的 `provider:mock`（`mock`）模块已**整体删除**，`settings.gradle.kts` 中的 `include(...)` 也已移除。删除原因不是它无用，而是它会在 APK 内伪造账号与文件：一个能凭空造出账号与文件列表的 Provider 一旦进入 release 构建，就存在被真实用户当成真实数据的风险。公共契约与平台无关这一点，现在由两个真实 Provider 各自接入 `core:provider-testing` 的共享规则来检验。
+
+  **第二个 Provider 是这条架构约束的第一次实战检验**：接入 `provider:baidu` 时，`core:provider-api`、`core:model`、`core:domain`、任何 feature 模块与播放器都**没有改动一行**，`ProviderRegistryModule` 也没有。唯一的注册动作发生在 `provider/baidu/.../di/BaiduProviderModule.kt` 里的一次 `@IntoSet`。百度与 115 在协议层面差别极大（按路径寻址 vs 按数字 id 寻址、无「还有下一页」字段、播放不需要鉴权头、下载需要内嵌 JS 引擎），但这些差异全部被契约吸收在了 Provider 内部。
 
 ---
 
@@ -123,11 +125,15 @@ data class UploadCapabilities(
 
 ## 4. 契约由测试强制，而非由文档约定
 
-`core/provider-testing` 里有一套 `ProviderContractRules`（29 条规则）。`provider:p115` 接入的就是它：
+`core/provider-testing` 里有一套 `ProviderContractRules`（29 条规则）。两个 Provider 接入的都是它：
 
 ```kotlin
 class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build())
+class BaiduProviderContractTest : ProviderContractRules(BaiduContractFixture.build())
 ```
+
+**同一套规则、两个协议完全不同的网盘**，这正是它作为「共享契约」的意义：规则断言的是行为
+（类型化失败、分页终止、能力与行为一致、`PreviewKind` 不含 URL），而不是厂商语义。
 
 这套规则抓到了本工程中若干**真实缺陷**，这是它存在的最好理由：
 
@@ -404,10 +410,12 @@ padding —— 这正是「顶部有点空」的成因。
 
 - `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（实测 75,355,607–76,363,289 bytes，
   `applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`）；
-- **402 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `feature:files` 52 ·
-  `core:network` 33 · `feature:player` 32 · `core:designsystem` 28 · `core:data` 17 ·
-  `feature:settings` 8 · `feature:accounts` 7 · `feature:preview` 7）；
-- 真实账号联调**未进行**，原因与清单见 [`docs/api-mapping.md`](api-mapping.md) §10。
+- **499 个测试全绿，0 失败**（`core:domain` 144 · **`provider:baidu` 97** · `provider:p115` 74 ·
+  `feature:files` 52 · `core:network` 33 · `feature:player` 32 · `core:designsystem` 28 ·
+  `core:data` 17 · `feature:settings` 8 · `feature:accounts` 7 · `feature:preview` 7）；
+  `./gradlew test --rerun-tasks` 的实际执行总数为 854（含 Android 模块的 debug + release 双变体）。
+- 真实账号联调**未进行**，原因与清单见 [`docs/api-mapping.md`](api-mapping.md) §10
+  与 [`docs/baidu-api-mapping.md`](baidu-api-mapping.md) §9。
 
 ---
 

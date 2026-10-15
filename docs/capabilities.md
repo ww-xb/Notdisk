@@ -126,7 +126,123 @@ Android Keystore 支持的加密存储（`P115EncryptedCredentialStore`），静
 
 ---
 
-## 3. 已删除的 Mock 网盘
+## 3. 百度网盘
+
+依据：`docs/baidu-api-mapping.md`（底层逆向文档位于 `/data/workspace/baidu_reverse/docs/`，实测日期 2026-10-14）。
+图例：`✅` = 文档标注实测（或 bundle 完整字面量 + 调用点）；`⚠️` = 文档标注为**推断**。
+
+### 3.1 账号
+
+| 能力 | 值 | 依据 |
+|---|---|---|
+| `interactiveFlows` | `{MANUAL_CREDENTIAL}` | §1.5 / §2.4 —— 粘贴浏览器会话 Cookie，**不需要任何开发者凭据** |
+| `silentRefresh` | `UNSUPPORTED` | 百度未文档化任何刷新机制；`BDUSS` 由用户重新粘贴替换 |
+| `multipleAccounts` | `true` | 凭据按登录产生，可并存 |
+| `logout` | `SUPPORTED` | §2.5 |
+| `storageQuota` | `SUPPORTED` | §9.2 `✅` |
+
+**为什么只声明一条流程**：§2.2 的扫码链路有 10 步，其中**第 7 步**
+（`passport.baidu.com/v3/login/main/qrbdusslogin`）需要 `sig`，而 `sig` 由 Passport 前端私有
+JavaScript（`alg=v3` + `shaOne`）计算。文档明确「自研 APP 若要完整复刻需逆向 passport SDK」。
+第 7 步正是**唯一产生 `BDUSS`** 的一步 —— 没有它，前 6 步没有任何意义。
+
+所以扫码登录的*大部分*可复刻，但**整个流程**不可复刻，因此整个流程都不能声明。
+声明一个走不到最后的流程，正是「UI 显示必然失败的入口」这条禁令所指的情况。
+
+**⚠️ 一个必须记住的陷阱（已在代码中处理）**：`/api/loginStatus` 对**未登录**请求返回
+`{"errno":0,"isLogin":0}` —— 一个**成功的信封**。只检查 `errno` 会把未登录的粘贴当成有效会话。
+代码同时检查 `isLogin`（`a cookie that is not logged in is rejected` 断言了它）。
+
+### 3.2 文件系统
+
+| 能力 | 值 | 依据 |
+|---|---|---|
+| `listChildren` | `SUPPORTED` | §3.2 `✅` |
+| `getFile` | `SUPPORTED` | §3.5 `✅`（`filemetas`，含元素级 `errno`） |
+| `getPath` | `SUPPORTED` | **由 id 直接推导，零请求**（id 即绝对路径） |
+| `search` | `SUPPORTED` | §3.4 `✅`（`recursion=1`，**删除** `dir`） |
+| `serverSideBreadcrumb` | `false` | §3.2 的列表响应**不带**面包屑数组（与 115 的 `path[]` 不同）；UI 用 `getPath`，此处精确 |
+| `paging` | `OFFSET_LIMIT` | §3.2 的 `page` + `num` |
+| `serverSideSortFields` | `NAME, MODIFIED_TIME, SIZE` | §3.2 只文档化三个 `order` 取值 |
+| `categoryFilter` | `SUPPORTED` | §3.3 的 `category`（1/2/3/4/6/7） |
+| `suffixFilter` | `UNSUPPORTED` | §3.2/§3.4 都没有后缀参数 |
+
+**`categoryFilter` 的映射不是恒等映射**：`5` 在百度不是文件类型（它是权限位 `CREATE_DIR`），
+`6` 是「其他」而不是「压缩包」。因此 `ARCHIVE` → `6`、`SOFTWARE` → `7`、`BOOK` → `4`。
+这是对厂商更粗粒度的分类法的近似，已在此处和代码注释中标注。
+
+### 3.3 文件操作
+
+| 能力 | 值 | 依据 / 理由 |
+|---|---|---|
+| `createFolder` | `SUPPORTED` | §3.7 `✅`（`/api/create?a=commit`，响应 `{errno,name,path}` 已实测） |
+| `rename` | `SUPPORTED` | §3.6 `✅` —— **唯一**在 bundle 中有完整 URL 字面量的 `opera` |
+| `move` | `UNVERIFIED` | §3.6 `⚠️` —— 仅由 `actionType:"move"` 透传推断 |
+| `copy` | `UNVERIFIED` | §3.6 `⚠️` —— 仅由 `actionType:"copy"` 透传推断 |
+| `delete` | `UNVERIFIED` | §3.6 `⚠️` —— 仅由 `doManage("delete",…)` 推断 |
+| `batchOperations` | `UNVERIFIED` | 同上 |
+| `share` | `UNVERIFIED` | §6.1 —— 实测响应要求绑定手机号，**成功响应从未被观测** |
+| `upload` | `UNVERIFIED` | §4 文档完整，但会写入真实账号，且分片目标来自 60 秒有效的主机池 |
+| `download` | **`UNSUPPORTED`** | §5.2 —— 签名需要执行**服务端实时下发的 JavaScript** |
+| `trash.*` | `SUPPORTED` | §3.10 `✅`（四个操作均有源码字面量，列表端点已实测） |
+| `purgeRequiresSecret` | `false` | 百度回收站没有密码（与 115 的 `rb_pass` 不同） |
+| `idempotentWrites` | `false` | §3.6：`copy` 默认 `ondup:newcopy`，重试会产生**第二份副本** |
+
+**为什么 `move`/`copy`/`delete` 是 `UNVERIFIED` 而不是 `SUPPORTED`**：这不是保守，
+而是**依据强度**。文档明确记录 bundle 里**没有集中的 `opera` 枚举** —— `rename` 与 `import`
+有完整字面量，其余是从 `actionType` 透传推出来的。代码是完整实现的、按文档请求形状测过的；
+缺的是「厂商确实接受这三个字符串」的**证据**。三态声明存在的意义正是让这种区别可以被表达。
+
+### 3.4 媒体
+
+| 能力 | 值 | 依据 / 理由 |
+|---|---|---|
+| `videoStreaming` | `SUPPORTED` | §7.3 `✅`（两个阶段均实测） |
+| `audioStreaming` | `UNSUPPORTED` | §7.6 —— 音频走 **dlink**，不走 `/api/streaming`，而 dlink 本工程无法签名 |
+| `protocols` | `{HLS}` | §7.3 第二阶段返回 `application/x-mpegURL` |
+| `rangeRequests` | `true` | §7.4 实测 `Range: bytes=0-1023` → `HTTP 206` + `Accept-Ranges: bytes` |
+| `urlExpires` | `false` | 播放 URL 就是 API 调用本身，不是带生命周期的签名 URL；可重发即刷新 |
+| `urlRefresh` | `SUPPORTED` | 同上 |
+| `subtitles` | `UNVERIFIED` | §7.5 的清单端点已实测，但消费它要解析 HLS `#EXT-X-MEDIA` 并映射音轨，本工程未做 |
+| `multipleRenditions` | `SUPPORTED` | §7.3.1 的 1080/720/480/360 阶梯 |
+| `separateAudioTracks` | `UNSUPPORTED` | §7.6 —— 视频转码器的 `multitrack_list` 命名规则对百度未文档化 |
+| `playbackProgress` | `UNVERIFIED` | §7 —— 进度保存在厂商的 `localStorage`，**没有**上报端点 |
+| `requiresRequestHeaders` | **`false`** | §7.4 实测分片 URL 自带签名，**不需要** Cookie/UA/Referer |
+
+**`requiresRequestHeaders = false` 是一个安全结论，不只是配置差异**：它意味着播放器
+**不会**被交给账号 Cookie 去转发给 CDN。115 的场景需要 `Referer`/`Origin`/`UA`，百度不需要 ——
+把凭据交给一个不需要它的第三方主机是没有收益的泄露。
+
+**`errno 133`（广告闸门）如何被表达**：它是一个 `CloudError.Unsupported`，
+但 `capability` 字段指向**窄**能力 `media.streaming.adToken`，而不是宽能力 `media.videoStreaming`。
+这个区分是必需的：共享契约套件规定「宽能力可以有窄的洞，但洞必须可识别」。
+不带 `capability` 的 `Unsupported` 会被（正确地）判定为「声明了流媒体却做不到」，
+而那会掩盖真实情况 —— 流媒体可用，只是这个文件在广告闸门后面。
+代码会自动用闸门给出的 `adToken` 完成第二阶段（深度上限 2，因为文档只描述两个阶段）。
+
+### 3.5 预览
+
+| 能力 | 值 | 依据 / 理由 |
+|---|---|---|
+| `image` | `SUPPORTED` | §8.2 —— `thumbs` 随**列表响应**下发，零额外请求 |
+| `thumbnail` | `SUPPORTED` | 同上；`size`/`quality` **不在签名内** |
+| `text` | `SUPPORTED` | §8.5 `✅`（`picdocpreview`） |
+| `pdf` | `UNVERIFIED` | §8.1 路由到 `pdf-plugin`（平台阅读器）；分类正确，取字节需 dlink |
+| `officeDocument` | `UNVERIFIED` | §8.4 —— `/disk/docview` 302 到**独立 OAuth 应用**，本工程无法完成该授权流程 |
+| `supportedExtensions` | 见 `BaiduFileMapper.PREVIEWABLE_EXTENSIONS` | 由 §8.1 的注册表转录，非猜测 |
+
+**为什么 Office 文档的分类结果是「无 viewer 材料的 `OfficeDocument`」**：
+`PreviewKind.Unsupported` 是错的（文件**是**可预览的），而伪造一个
+`OfficeViewer(url, token)` 会宣称一个走不通的入口。前者误导，后者撒谎 ——
+所以取中间那个诚实的形状。
+
+**签名 URL 绝不进入模型**：`thumbs` 与 `docpreview` 的 URL 带 `sign`/`expires`，
+是短时效凭据，而 `FileItem` **会被缓存**。因此映射只把「URL 存在」记成布尔值。
+`signed urls never leak into the file model` 断言了模型里不含 `sign=` 与 `http`。
+
+---
+
+## 4. 已删除的 Mock 网盘
 
 `provider:mock` 模块已**整体删除**（`provider/mock/` 目录与 `settings.gradle.kts` 的
 `include(...)` 均已移除），因此本表不再有 Mock 的能力声明。
@@ -140,7 +256,7 @@ Android Keystore 支持的加密存储（`P115EncryptedCredentialStore`），静
 
 ---
 
-## 4. 如何读这张表写 UI
+## 5. 如何读这张表写 UI
 
 ```kotlin
 val caps = registry.capabilitiesOf(providerId).getOrNull() ?: return
@@ -161,10 +277,10 @@ val sortOptions = FileSortField.entries.filter { it in caps.fileSystem.serverSid
 
 ---
 
-## 5. 能力声明的自检清单（新增 Provider 时）
+## 6. 能力声明的自检清单（新增 Provider 时）
 
-- [ ] 每个 `SUPPORTED` 都有 `API_REFERENCE.md` 的 `✅` 级依据，或本项目的实测记录
-- [ ] `📖` 级依据一律标 `UNVERIFIED`
+- [ ] 每个 `SUPPORTED` 都有逆向文档的 `✅` 级依据（实测，或 bundle 完整字面量 + 调用点），或本项目的实测记录
+- [ ] `⚠️` 级（推断）依据一律标 `UNVERIFIED`
 - [ ] 声明 `UNSUPPORTED`/`UNVERIFIED` 的操作，方法返回 `Unsupported` 且**不发请求**
 - [ ] `idempotentWrites` 按最坏情况填（任一写接口不幂等 → `false`）
 - [ ] 不确定的布尔型能力用可空字段留 `null`，不要猜

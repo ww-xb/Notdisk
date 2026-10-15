@@ -16,8 +16,8 @@ android {
         // Android 15+ only. See `build-logic/.../ProjectExtensions.kt` for why the floor is 35.
         minSdk = 35
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -64,11 +64,12 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:provider-api"))
     implementation(project(":core:designsystem"))
-    // The only shipped provider. The offline demo provider (`provider:mock`) was removed from the
-    // build entirely: a provider that fabricates accounts and files must not be reachable from a
-    // release APK, and keeping it behind a build flag would leave a fake-account code path one
-    // property away from shipping.
+    // Shipped providers. The offline demo provider (`provider:mock`) was removed from the build
+    // entirely: a provider that fabricates accounts and files must not be reachable from a release
+    // APK, and keeping it behind a build flag would leave a fake-account code path one property away
+    // from shipping.
     implementation(project(":provider:p115"))
+    implementation(project(":provider:baidu"))
     implementation(project(":feature:accounts"))
     implementation(project(":feature:files"))
     implementation(project(":feature:player"))

@@ -85,6 +85,22 @@ class AccountsViewModel @Inject constructor(
 
     /** Starts an interactive authorisation and drives the poll loop. */
     fun beginAuthorization(providerId: ProviderId, flow: AuthFlowKind) {
+        if (flow == AuthFlowKind.MANUAL_CREDENTIAL) {
+            // The credential is entered in a dialog *before* any request is issued, so the flow is
+            // staged rather than started: the dialog's confirm button calls
+            // [submitManualCredential]. Starting the flow here would immediately fail the
+            // provider's "no credential supplied" check and show the user an error for a form they
+            // have not filled in yet.
+            _state.update {
+                it.copy(
+                    manualCredentialProviderId = providerId,
+                    pollHint = null,
+                    banner = null,
+                )
+            }
+            return
+        }
+
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             _state.update {
@@ -111,11 +127,64 @@ class AccountsViewModel @Inject constructor(
                     // `Completed` means the provider produced credentials synchronously (no user
                     // interaction). Nothing to poll, so the list is refreshed immediately.
                     if (challenge is AuthChallenge.Completed) {
-                        onAuthorizationFinished(challenge.accountId)
+                        onAuthorizationFinished(providerId, challenge.accountId)
                         return@launch
                     }
 
                     pollUntilTerminal(providerId, challenge.challengeId)
+                }
+            }
+        }
+    }
+
+    /** Closes the manual-credential dialog without submitting anything. */
+    fun cancelManualCredential() {
+        _state.update { it.copy(manualCredentialProviderId = null) }
+    }
+
+    /**
+     * Submits a pasted session cookie.
+     *
+     * The dialog stays open on failure, because the overwhelmingly likely cause is a bad paste and
+     * closing it would force the user to start over from the provider card.
+     */
+    fun submitManualCredential(credential: String) {
+        val providerId = _state.value.manualCredentialProviderId ?: return
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
+            _state.update { it.copy(isSubmittingCredential = true, banner = null) }
+
+            val result = accounts.beginAuthorization(
+                providerId = providerId,
+                flow = AuthFlowKind.MANUAL_CREDENTIAL,
+                params = com.notdisk.core.provider.AuthFlowParams(manualCredential = credential),
+            )
+
+            _state.update { it.copy(isSubmittingCredential = false) }
+
+            when (result) {
+                is CloudResult.Failure -> _state.update {
+                    it.copy(banner = Banner.from(result.error))
+                }
+
+                is CloudResult.Success -> when (val challenge = result.data) {
+                    is AuthChallenge.Completed -> {
+                        _state.update { it.copy(manualCredentialProviderId = null) }
+                        onAuthorizationFinished(providerId, challenge.accountId)
+                    }
+
+                    // A manual-credential flow has nothing to poll: a provider that answers with
+                    // any other challenge shape has not implemented what it advertised, and saying
+                    // so is better than spinning on a code that will never advance.
+                    else -> _state.update {
+                        it.copy(
+                            manualCredentialProviderId = null,
+                            banner = Banner(
+                                message = "该网盘没有完成 Cookie 登录所需的实现",
+                                isWarning = true,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -157,7 +226,7 @@ class AccountsViewModel @Inject constructor(
                     }
 
                     is AuthChallengeState.Succeeded -> {
-                        onAuthorizationFinished(challengeState.accountId)
+                        onAuthorizationFinished(providerId, challengeState.accountId)
                         return
                     }
 
@@ -188,7 +257,12 @@ class AccountsViewModel @Inject constructor(
         }
     }
 
-    private fun onAuthorizationFinished(accountId: AccountId) {
+    /**
+     * @param providerId the provider the account was bound to. Passed explicitly rather than read
+     *   from state because the manual-credential path never sets `state.providerId` (it has no
+     *   challenge to poll), so reading it back would verify against the wrong provider.
+     */
+    private fun onAuthorizationFinished(providerId: ProviderId, accountId: AccountId) {
         _state.update {
             it.copy(
                 authorization = AuthorizationState.Idle,
@@ -200,7 +274,7 @@ class AccountsViewModel @Inject constructor(
         loadAccounts()
 
         viewModelScope.launch {
-            accounts.verifyAccount(_state.value.providerId ?: return@launch, accountId)
+            accounts.verifyAccount(providerId, accountId)
             loadAccounts()
         }
     }
@@ -308,11 +382,27 @@ data class AccountsUiState(
     val verifyingAccountId: AccountId? = null,
     val removingAccountId: AccountId? = null,
     val banner: Banner? = null,
+    /**
+     * The provider whose manual-credential (cookie) dialog is open, or `null`.
+     *
+     * A *provider id* rather than a boolean because the dialog needs the provider's name in its
+     * title, and because a second "add account" tap while it is open must not be able to bind the
+     * pasted cookie to whichever provider was tapped last.
+     */
+    val manualCredentialProviderId: ProviderId? = null,
+    /** A cookie is being verified against the vendor; the dialog's confirm button shows progress. */
+    val isSubmittingCredential: Boolean = false,
 ) {
     val hasAccounts: Boolean get() = accounts.isNotEmpty()
 
     val canAddAccount: Boolean
         get() = providers.any { it.availableAuthFlows.isNotEmpty() }
+
+    /** The provider name for the open manual-credential dialog. */
+    val manualCredentialProviderName: String?
+        get() = manualCredentialProviderId?.let { id ->
+            providers.firstOrNull { it.id == id }?.displayName ?: id.value
+        }
 }
 
 /** The interactive-authorisation phase. */

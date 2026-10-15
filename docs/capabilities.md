@@ -36,11 +36,20 @@ enum class CapabilitySupport { SUPPORTED, UNVERIFIED, UNSUPPORTED }
 
 | 能力 | 值 | 依据 |
 |---|---|---|
-| `interactiveFlows` | `{QR_CODE}` | §2.1 扫码登录为 `✅`，且**不需要开发者凭据** |
+| `interactiveFlows` | `{QR_CODE, MANUAL_CREDENTIAL}` | §2.1 扫码登录为 `✅`；`MANUAL_CREDENTIAL` 为粘贴会话 Cookie，两者都**不需要开发者凭据** |
 | `silentRefresh` | `UNSUPPORTED` | 115 的 Cookie 会话没有文档化的刷新机制 |
 | `multipleAccounts` | `true` | 凭据按登录产生，可并存 |
 | `logout` | `SUPPORTED` | §2.5 登出接口 |
 | `storageQuota` | `SUPPORTED` | §9.3 `files/index_info` `✅` |
+
+**`MANUAL_CREDENTIAL` 为何现在被接受**：早期实现直接以 `Unsupported` 拒绝该流程，理由之一是
+「手工输入难以安全存储」—— 这一半是错的：粘贴的 Cookie 与扫码得到的凭据进入的是**同一个**
+Android Keystore 支持的加密存储（`P115EncryptedCredentialStore`），静态存储的安全性并无差别。
+用户从浏览器开发者工具复制 `Cookie` 请求头粘贴进来；`P115CookieParser` 解析它，要求
+`UID` / `CID` / `SEID` / `KID` 四项（`USERSESSIONID` 可选），随后凭据**先**向
+`my.115.com/?ct=ajax&ac=nav` 校验，**通过后才写入**加密凭据存储，账号行也才随之创建 ——
+因此一个失效或被截断的 Cookie 不会留下一个「看似已绑定、首次点击才失败」的账号。
+该流程返回 `Completed` challenge（凭据已产生，**没有需要轮询的东西**）。
 
 **OAuth 为何不在 `interactiveFlows` 里**：§2.4 的 OAuth 流程标记为 `📖`，且需要本项目尚未获得的 `app_id`。配置入口已就绪（`P115Configuration.oauthClientId`），未配置时 `oauthSupport = UNSUPPORTED`，UI 隐藏入口而**不是**弹出一个必然失败的按钮。
 
@@ -117,21 +126,17 @@ enum class CapabilitySupport { SUPPORTED, UNVERIFIED, UNSUPPORTED }
 
 ---
 
-## 3. Mock 网盘
+## 3. 已删除的 Mock 网盘
 
-Mock Provider 的能力声明与 115 **同样诚实**，并刻意保留同类缺口，以便离线也能走到「厂商不支持」的 UI 分支：
+`provider:mock` 模块已**整体删除**（`provider/mock/` 目录与 `settings.gradle.kts` 的
+`include(...)` 均已移除），因此本表不再有 Mock 的能力声明。
 
-| 能力 | 值 | 与 115 的关系 |
-|---|---|---|
-| `interactiveFlows` | `{QR_CODE, MANUAL_CREDENTIAL}` | 两者都完全离线、立即成功 |
-| `playbackProgress` | `UNSUPPORTED` | **与 115 一致**（115 为 `UNVERIFIED`，二者对 UI 的请求都是「不要上报」） |
-| `share` | `UNVERIFIED` | **与 115 一致**，避免 Mock 让人误以为分享已经可用 |
-| `idempotentWrites` | `false` | **与 115 一致** |
-| `trash.purgeRequiresSecret` | `false` | 与 115 相反，使「无需密钥」分支也有覆盖 |
-| 文件系统 / 操作 / 媒体 / 预览 | 全部 `SUPPORTED` | Mock 是参考实现，应当完整 |
-| `media.protocols` | `{HLS, PROGRESSIVE_HTTP}` | HLS 侧同样有独立音轨，用于约束播放器 |
+删除理由与能力声明直接相关：该 Provider 会**伪造账号与文件**。它能如实声明自己的缺口，
+但仍然会在 APK 内凭空造出「可浏览的网盘」；一旦随 release 版本发布，用户就可能把这些假数据
+当成自己真实网盘的内容。**一个会伪造账号和文件的 Provider 不能从 release APK 可达。**
 
-**为何 Mock 要与 115 保留同样的缺口**：如果 Mock 什么都支持，UI 就永远不会走到「不支持」的分支，那些分支会在真实账号上第一次运行时才暴露。保留缺口使离线开发就能覆盖这些路径。
+它过去承担的「离线覆盖不支持分支」职责，现在由录制响应体驱动的 `provider:p115` HTTP 测试和
+各 feature 模块的 Compose 状态分支测试承担。
 
 ---
 

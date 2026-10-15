@@ -28,7 +28,7 @@
         ┌─────────────────┼──────────────────┬────────────────┐
         ▼                 ▼                  ▼                ▼
   feature:accounts  feature:files     feature:player   feature:preview
-  feature:settings                    feature:transfers
+  feature:settings
         │                 │                  │                │
         └─────────────────┴────────┬─────────┴────────────────┘
                                    ▼
@@ -43,12 +43,9 @@
             (CloudProvider 等契约)          (FileItem / MediaResource …)
                     ▲                              ▲
                     │                              │
-        ┌───────────┴───────────┐                  │
-        │                       │                  │
-  provider:mock           provider:p115 ───────────┘
-  (离线参考实现)          (真实接入)
-        │                       │
-        └───────────┬───────────┘
+            provider:p115 ─────────────────────────┘
+            (真实接入)
+                    │
                     ▼
                core:common   (CloudResult / CloudError / CloudLogger)
 ```
@@ -57,7 +54,7 @@
 
 - **`core:domain` 是纯 Kotlin JVM 模块**，不是 Android 模块。它编译不过任何 Android API，这在编译期就杜绝了「Domain 层偷偷用 Context」。
 - **`core:designsystem` 不依赖 `core:model`**。它接收原始类型（字符串、布尔、尺寸）而不是 `FileItem`，因此 UI 组件无法知道「文件来自哪个网盘」。
-- **`provider:mock` 是纯 JVM 模块**。它和 `provider:p115` 实现同一套 `CloudProvider` 契约，但不需要 Android 运行时 —— 这正是「公共契约是否真的与平台无关」的检验。
+- **Provider 只有一个**：`provider:p115`。此前的 `provider:mock`（`mock`）模块已**整体删除**，`settings.gradle.kts` 中的 `include(...)` 也已移除。删除原因不是它无用，而是它会在 APK 内伪造账号与文件：一个能凭空造出账号与文件列表的 Provider 一旦进入 release 构建，就存在被真实用户当成真实数据的风险。公共契约与平台无关这一点，现在由 `provider:p115` 接入 `core:provider-testing` 的共享规则来检验。
 
 ---
 
@@ -126,11 +123,10 @@ data class UploadCapabilities(
 
 ## 4. 契约由测试强制，而非由文档约定
 
-`core/provider-testing` 里有一套 `ProviderContractRules`（29 条规则）。**Mock Provider 和 115 Provider 跑的是同一个类**：
+`core/provider-testing` 里有一套 `ProviderContractRules`（29 条规则）。`provider:p115` 接入的就是它：
 
 ```kotlin
-class MockCloudProviderContractTest : ProviderContractRules(MockProviders.contractFixture())
-class P115ProviderContractTest        : ProviderContractRules(P115ContractFixture.build())
+class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build())
 ```
 
 这套规则抓到了本工程中若干**真实缺陷**，这是它存在的最好理由：
@@ -324,20 +320,69 @@ LocalIoError        Unknown
 
 ---
 
-## 11. 已验证的构建与测试状态
+## 11. 导航与首页的三级规则
+
+### 11.1 宿主导航
+
+根 `Scaffold` 的底部导航只有**两个**顶级标签：**文件**与**设置**。
+账号页不是顶级标签，入口在**设置 → 账号**（`SettingsScreen` 的「管理账号」/「去绑定」按钮
+调用 `onOpenAccounts`，导航到 `Routes.ACCOUNTS`）。
+
+### 11.2 首页按账号数分三级
+
+`FilesViewModel` 用显式的 `ScreenLevel` 表达当前层级，而不是从 `breadcrumb.isEmpty()` 反推 ——
+后者会把三种本质不同的界面混为一谈。规则只看已绑定账号数：
+
+| 已绑定账号数 | `ScreenLevel` | 首页 |
+|---|---|---|
+| 0 | `EMPTY` | 空状态，给出「去绑定账号」入口 |
+| 1 | `ACCOUNT_ROOT_SINGLE` | **直接显示该账号的内容**，不插入分组层 |
+| ≥2 | `HOME_MULTI` | **每个账号一个顶层文件夹**，点进去才是该网盘内容 |
+
+`homeItemsFor` 生成 `HOME_MULTI` 的行：行的 `id` 是 **account id**（不是 provider id，因为同一
+Provider 可以绑定两个账号，两者都必须作为独立顶层文件夹出现），行的名字是 **Provider 显示名**
+（例如「115 网盘」）。同一 Provider 绑定了不止一个账号时，在显示名后追加 ` · ` 与账号显示名
+（`"$cloudName · ${account.displayName}"`，例如「115 网盘 · 张三」）以区分。
+这些是合成的文件夹行，不携带任何厂商能力标志（`canRename = false` 等），因为它们不是真实的远程对象。
+
+### 11.3 返回键向上走，而不是退出应用
+
+文件夹浏览的层级由 `FilesViewModel` 自己持有，导航图的后退栈里只有首页与 player/preview。
+因此若不拦截，位于第 3 层目录时按返回键会直接落到 Activity 并**关闭应用**。
+
+`NotDiskNavHost` 用 `BackHandler` 让浏览器优先处理：**仅当浏览器还能向上时启用**。
+`navigateUp()` 在云的根目录（`breadcrumb.size <= 1`）调用 `goHome()` —— 层次上有两个账号时回到
+网盘列表，只有一个账号时回到该账号根目录。没有上一层时（`HOME_MULTI`、`EMPTY`、单账号根目录）
+handler 处于禁用状态，交回平台行为即退出应用。不存在「总是消费返回事件」的实现，
+否则用户将无法退出。
+
+### 11.4 Edge-to-edge 的 inset 归属
+
+应用使用 `enableEdgeToEdge()`，窗口 inset 必须**恰好被消费一次**。因此：
+
+- 根 `Scaffold` 声明 `contentWindowInsets = WindowInsets(0, 0, 0, 0)`，只保留底部导航栏的高度；
+- 顶部 inset 由各页面自己拥有：文件页的 `TopAppBar` 使用 `statusBarsPadding()`；
+  player/preview 没有 app bar，由它们自己的顶部行应用 `statusBarsPadding()`。
+
+此前宿主消费了状态栏 inset，而 `feature:files` 的嵌套 `Scaffold` 又叠加了一次 app bar 的 inset，
+这正是屏幕上出现空白带的成因。
+
+---
+
+## 12. 已验证的构建与测试状态
 
 见 [`docs/testing.md`](testing.md)。当前：
 
-- `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（25.3 MB，
-  `applicationId = com.notdisk.app`）；
-- **438 个测试全绿，0 失败**（`core:domain` 144 · `provider:mock` 70 · `provider:p115` 63 ·
-  `core:network` 33 · `feature:player` 32 · `feature:files` 31 · `core:designsystem` 28 ·
-  `core:data` 17 · `feature:accounts` 7 · `feature:preview` 7 · `feature:settings` 6）；
+- `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（约 76 MB，
+  `applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`）；
+- **393 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `core:network` 33 ·
+  `feature:player` 32 · `core:designsystem` 28 · `feature:files` 43 · `core:data` 17 ·
+  `feature:settings` 8 · `feature:accounts` 7 · `feature:preview` 7）；
 - 真实账号联调**未进行**，原因与清单见 [`docs/api-mapping.md`](api-mapping.md) §10。
 
 ---
 
-## 12. 新增一个网盘的步骤
+## 13. 新增一个网盘的步骤
 
 1. 分析官方文档，产出能力映射表（照 `docs/api-mapping.md` 的格式）。
 2. 新建 `provider/<name>` 模块，实现 `CloudProvider` 的五个子接口。

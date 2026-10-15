@@ -127,10 +127,109 @@ internal class P115AuthProvider(
             ),
         )
 
-        AuthFlowKind.MANUAL_CREDENTIAL -> CloudResult.Failure(
-            CloudError.Unsupported(
-                message = "本版本不接受手工粘贴 Cookie：115 的凭据包含长效 SEID，手工输入易泄露且难以安全存储。",
-                capability = "auth.flow.manual_credential",
+        AuthFlowKind.MANUAL_CREDENTIAL -> beginManualCredential(params)
+    }
+
+    /**
+     * Binds an account from a session cookie the user pasted.
+     *
+     * ### Why this exists, and why the previous refusal was wrong
+     * An earlier version of this provider refused the flow outright ("手工输入易泄露且难以安全存储").
+     * The second half of that objection was simply false: the credential goes into exactly the same
+     * encrypted store (`P115EncryptedCredentialStore`, Android Keystore-backed) as a scanned login,
+     * so pasting a cookie is not less safe *at rest* than scanning a QR code. The first half is a
+     * real trade-off — a pasted cookie is briefly in the clipboard — but it is the user's decision
+     * to make, and the alternative for someone whose Web login already works is not using the app
+     * at all.
+     *
+     * ### What is accepted
+     * Either a full `Cookie:` header value (`UID=…; CID=…; SEID=…; KID=…`) copied from the browser's
+     * devtools, or the same pairs on separate lines. `USERSESSIONID` and `PHPSESSID` are optional:
+     * §2.1 records that `webapi.115.com` authenticates with the four core cookies.
+     *
+     * ### Why the credential is verified before it is kept
+     * A pasted cookie can be stale, truncated, or belong to a different site. Persisting first and
+     * discovering later would create an account row that renders as usable and fails on first use,
+     * so the session is checked against `my.115.com/?ct=ajax&ac=nav` *before* anything is written.
+     */
+    private suspend fun beginManualCredential(
+        params: AuthFlowParams,
+    ): CloudResult<AuthChallenge> {
+        val raw = params.manualCredential?.trim().orEmpty()
+        if (raw.isEmpty()) {
+            return CloudResult.Failure(
+                CloudError.InvalidArgument(message = "请粘贴 115 的 Cookie 内容"),
+            )
+        }
+
+        val parsed = P115CookieParser.parse(raw)
+            ?: return CloudResult.Failure(
+                CloudError.InvalidArgument(
+                    message = "Cookie 解析失败：需要至少包含 UID、CID、SEID、KID 四项。" +
+                        "请从浏览器开发者工具的请求头中复制完整的 Cookie。",
+                ),
+            )
+
+        // Verified against the vendor before it is written anywhere, so a bad paste cannot create
+        // an account row that looks bound and then fails on the user's first tap.
+        val navRequest = http.get(
+            url = http.resolve(P115Endpoints.SESSION_NAV),
+            cookies = parsed.cookieHeader(),
+        )
+        val nav = when (val result = http.execute(navRequest, tag = "cookie.nav")) {
+            is CloudResult.Failure -> return CloudResult.Failure(
+                if (result.error.requiresReauthentication) {
+                    CloudError.TokenExpired(
+                        message = "Cookie 已失效或不属于 115，请重新复制。",
+                        canRefresh = false,
+                        vendorCode = result.error.vendorCode,
+                        vendorMessage = result.error.vendorMessage,
+                    )
+                } else {
+                    result.error
+                },
+            )
+
+            is CloudResult.Success -> result.data
+        }
+
+        val data = nav.dataObject
+        val userId = data?.longOf("user_id", "user_id_str")?.toString()
+            ?: data?.stringOf("user_id")
+            ?: parsed.uid.substringBefore('_')
+        val userName = data?.stringOf("user_name") ?: "115 用户 $userId"
+
+        // Re-pasting a cookie for an account that is already bound reuses that account rather than
+        // creating a duplicate row for the same 115 user.
+        val accountId = accounts.findByRemoteUserId(userId)?.accountId
+            ?: AccountId("p115-${UUID.randomUUID()}")
+
+        val credential = parsed.copy(userId = userId, obtainedAt = clock())
+        credentials.save(accountId, credential)
+        accounts.upsert(
+            P115AccountMetadata(
+                accountId = accountId,
+                remoteUserId = userId,
+                displayName = userName,
+                authState = AuthState.AUTHORIZED,
+                membershipLabel = data?.longOf("mark", "mark1")?.toString()
+                    ?.let { P115Membership.labelFor(it) },
+                membershipExpiresAt = data?.longOf("expire")
+                    ?.let { P115FileMapping.epochSecondsToMillis(it) }
+                    ?: data?.longOf("is_vip")?.let { P115FileMapping.epochSecondsToMillis(it) },
+                addedAt = accounts.findByRemoteUserId(userId)?.addedAt ?: clock(),
+                lastVerifiedAt = clock(),
+            ),
+        )
+
+        logger.i(TAG, "cookie login succeeded for account ${accountId.value.take(8)}…")
+
+        // `Completed` is the contract's "credentials were produced without further interaction":
+        // there is nothing to poll, so the caller refreshes its list immediately.
+        return CloudResult.Success(
+            AuthChallenge.Completed(
+                challengeId = "p115-cookie-${UUID.randomUUID()}",
+                accountId = accountId,
             ),
         )
     }

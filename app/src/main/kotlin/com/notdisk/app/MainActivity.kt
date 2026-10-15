@@ -49,6 +49,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // Enabled before `setContent` so the first frame already accounts for the system bars;
         // doing it afterwards produces a one-frame layout jump.
+        //
+        // The argument-free overload is used deliberately. On Android 15 (this app's floor) every
+        // app is edge-to-edge by default and the system bar *backgrounds* are transparent and not
+        // controllable, so passing explicit `SystemBarStyle`s would be either a no-op or a lie. What
+        // the app controls is where, and how often, the *insets* are consumed — which is decided in
+        // the Compose tree (see `NotDiskNavHost`), not here.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 

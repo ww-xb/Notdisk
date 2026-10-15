@@ -165,9 +165,14 @@ class P115CloudProvider(
         providerId = id,
 
         account = AccountCapabilities(
-            // Only the flows this build can actually run end-to-end. QR needs no developer
-            // credentials, so it is the one flow that is genuinely available.
-            interactiveFlows = setOf(AuthFlowKind.QR_CODE),
+            // Two flows this build runs end-to-end, and neither needs developer credentials:
+            //  - QR_CODE, §2.1's measured scan flow;
+            //  - MANUAL_CREDENTIAL, for a user already logged into 115 in a browser who would
+            //    rather paste the session cookie than scan. The credential lands in the same
+            //    Keystore-backed store, so offering it does not weaken storage security.
+            // OAuth is deliberately absent: §2.4 needs an `app_id` this project has not been
+            // issued, and advertising a flow that cannot start is exactly what §18 forbids.
+            interactiveFlows = setOf(AuthFlowKind.QR_CODE, AuthFlowKind.MANUAL_CREDENTIAL),
             // 115's cookie session has no documented refresh mechanism; `verifyAccount` re-checks it
             // and the user re-scans when it is gone.
             silentRefresh = CapabilitySupport.UNSUPPORTED,

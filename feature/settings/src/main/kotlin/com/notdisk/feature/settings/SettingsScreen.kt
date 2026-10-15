@@ -42,6 +42,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.notdisk.core.database.settings.NotDiskSettingsStore
 import com.notdisk.core.designsystem.component.CapabilityBadge
+import com.notdisk.core.designsystem.component.StatRow
+import com.notdisk.core.designsystem.format.FileSizeFormatter
 import com.notdisk.core.designsystem.component.EmptyState
 import com.notdisk.core.designsystem.format.CloudDateTimeFormatter
 import com.notdisk.core.designsystem.theme.NotDiskTheme
@@ -50,6 +52,7 @@ import com.notdisk.core.model.CapabilitySupport
 import com.notdisk.core.model.CloudAccount
 import com.notdisk.core.model.CloudCapabilities
 import com.notdisk.core.model.ProviderId
+import com.notdisk.core.model.StorageQuota
 import com.notdisk.core.model.AccountId
 import com.notdisk.core.model.AuthFlowKind
 import com.notdisk.core.model.AuthState
@@ -63,9 +66,10 @@ import com.notdisk.core.model.AuthState
  * `BuildConfig` field here would report the module's own version, not the app's. The application
  * supplies the real value at the navigation call site, which is the only place that knows it.
  *
- * @param onOpenAccounts navigates to the accounts screen. The settings screen deliberately does not
- *   embed account management: binding and re-authorising lives in one place, and a second copy here
- *   would be a second place to get token handling wrong.
+ * @param onOpenAccounts navigates to the account manager. This screen deliberately does not embed
+ *   account binding: credential handling lives in exactly one place, and a second copy here would
+ *   be a second place to get it wrong. Accounts *are* reached from settings (the bottom bar has no
+ *   accounts tab), so this is the app's only route to them.
  */
 @Composable
 fun SettingsRoute(
@@ -83,11 +87,13 @@ fun SettingsRoute(
         viewModel.refreshDiagnostics()
     }
 
+    // The app version shown in this screen. `versionName` is passed in from the app module (the
+    // only place that knows it, since build-config generation is off project-wide); the parameter
+    // stays so a future caller can override it, but the route no longer hardcodes it.
     SettingsScreen(
         state = state,
         versionName = versionName,
         providerIds = state.providerCapabilities.map { it.providerId.value },
-        onBack = {},
         onThemeChoice = viewModel::setThemeChoice,
         onDynamicColor = viewModel::setDynamicColor,
         onViewMode = viewModel::setViewMode,
@@ -121,7 +127,6 @@ fun SettingsScreen(
     state: SettingsUiState,
     versionName: String,
     providerIds: List<String>,
-    onBack: () -> Unit,
     onThemeChoice: (NotDiskSettingsStore.ThemeChoice) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
     onViewMode: (NotDiskSettingsStore.ViewMode) -> Unit,
@@ -136,6 +141,14 @@ fun SettingsScreen(
     onRefreshDiagnostics: () -> Unit,
     onClearDiagnostics: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * The account summary's quota line is supplied by the caller, which owns the one-shot
+     * `AccountRepository.storageQuota` read.
+     *
+     * Defaulted to empty because an absent entry is the honest rendering for a provider that
+     * reports no usage; the map is typed so a reader cannot misread what is in it.
+     */
+    quotas: Map<AccountId, StorageQuota> = emptyMap(),
 ) {
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -169,7 +182,11 @@ fun SettingsScreen(
                 onRecordRecents = onRecordRecents,
             )
 
-            AccountsSection(state = state, onOpenAccounts = onOpenAccounts)
+            AccountsSection(
+                state = state,
+                onOpenAccounts = onOpenAccounts,
+                quotas = quotas,
+            )
 
             CapabilitySection(state = state)
 
@@ -390,22 +407,133 @@ private fun PrivacySection(
 /**
  * A summary of bound accounts plus the route into account management.
  *
- * Deliberately a summary rather than a manager: binding, re-authorising and removing an account all
- * involve credential handling, and that lives in exactly one screen.
+ * ### Why the accounts *list* is here and binding is not
+ * The bottom bar no longer has an accounts tab, so this section is the app's only route into account
+ * management and has to carry more than a count. It therefore renders each bound account (name,
+ * provider, auth state, membership) inline — a user who came to settings to check "is my 115 still
+ * logged in?" should not have to open a second screen to find out — while every *mutating* action
+ * (bind, re-authorise, verify, remove) stays on the accounts screen, where credential handling
+ * lives in exactly one place.
+ *
+ * @param quotas storage usage per account, when the caller has fetched it. An absent entry omits the
+ *   line entirely rather than drawing an empty bar, which would claim "zero bytes used".
  */
 @Composable
-private fun AccountsSection(state: SettingsUiState, onOpenAccounts: () -> Unit) {
+private fun AccountsSection(
+    state: SettingsUiState,
+    onOpenAccounts: () -> Unit,
+    quotas: Map<AccountId, StorageQuota>,
+) {
     SectionHeaderWithIcon(title = "账号", icon = Icons.Filled.ManageAccounts)
 
+    if (state.accounts.isEmpty()) {
+        SettingRow(
+            title = "尚未绑定任何网盘账号",
+            subtitle = "绑定后，文件页会显示对应网盘的内容",
+        ) {
+            Button(onClick = onOpenAccounts) { Text(text = "去绑定") }
+        }
+        return
+    }
+
+    state.accounts.forEach { account ->
+        SettingsAccountRow(
+            account = account,
+            providerDisplayName = state.providerCapabilities
+                .firstOrNull { it.providerId == account.providerId }
+                ?.displayName
+                ?: account.providerId.value,
+            quota = quotas[account.accountId],
+        )
+    }
+
     SettingRow(
-        title = if (state.accountCount == 0) "尚未绑定任何网盘账号" else "已绑定 ${state.accountCount} 个账号",
-        subtitle = state.activeAccountLabel?.let { "默认账号：$it" }
-            ?: "绑定账号后，文件页会显示对应网盘的内容",
+        title = "共 ${state.accounts.size} 个账号",
+        subtitle = state.activeAccountLabel?.let { "默认打开：$it" }
+            ?: "文件页会按账号数量决定是否以网盘名分组",
     ) {
-        Button(onClick = onOpenAccounts) {
-            Text(text = if (state.accountCount == 0) "去绑定" else "管理账号")
+        OutlinedButton(onClick = onOpenAccounts) { Text(text = "管理账号") }
+    }
+}
+
+/** One bound account, read-only. *Changing* anything about it happens on the accounts screen. */
+@Composable
+private fun SettingsAccountRow(
+    account: CloudAccount,
+    providerDisplayName: String,
+    quota: StorageQuota?,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.Large, vertical = Dimens.Small),
+        verticalArrangement = Arrangement.spacedBy(Dimens.XSmall),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Dimens.Small),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = account.displayName,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            // The auth state is the one fact that decides whether the account is usable, so it is
+            // coloured and named rather than left implicit in a "manage" screen.
+            Text(
+                text = account.authState.chineseLabel(),
+                style = MaterialTheme.typography.labelMedium,
+                color = if (account.authState == AuthState.AUTHORIZED) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+        }
+
+        Text(
+            text = providerDisplayName,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        quota?.let { usage ->
+            StatRow(
+                label = "已用空间",
+                value = usage.usedLabel ?: usage.usedBytes?.let(FileSizeFormatter::formatBytes)
+                    ?: "未提供",
+                progress = usage.fraction(),
+                supportingText = usage.totalBytes?.let { total ->
+                    "共 ${usage.totalLabel ?: FileSizeFormatter.formatBytes(total)}"
+                },
+            )
         }
     }
+}
+
+/** The Chinese name of an [AuthState], for the settings summary. */
+private fun AuthState.chineseLabel(): String = when (this) {
+    AuthState.AUTHORIZED -> "已授权"
+    AuthState.EXPIRED -> "已过期"
+    AuthState.REVOKED -> "已退出"
+    AuthState.PENDING_AUTHORIZATION -> "等待授权"
+    AuthState.UNKNOWN -> "状态未知"
+}
+
+/**
+ * Used fraction of the quota, or `null` when either side is unreported.
+ *
+ * Returned as `null` rather than `0f` for a partial report: "we do not know how full this is" and
+ * "this is empty" must not look the same, which is exactly what [StatRow]'s `Float?` models.
+ */
+private fun StorageQuota.fraction(): Float? {
+    val used = usedBytes ?: return null
+    val total = totalBytes?.takeIf { it > 0 } ?: return null
+    return (used.toFloat() / total.toFloat()).coerceIn(0f, 1f)
 }
 
 // ------------------------------------------------------------------ 5. 网盘能力
@@ -869,7 +997,6 @@ private fun SettingsScreenPreview() {
             ),
             versionName = "0.1.0",
             providerIds = listOf("p115"),
-            onBack = {},
             onThemeChoice = {},
             onDynamicColor = {},
             onViewMode = {},
@@ -895,7 +1022,6 @@ private fun SettingsScreenEmptyPreview() {
             state = previewState(providers = emptyList()).copy(accounts = emptyList()),
             versionName = "0.1.0",
             providerIds = emptyList(),
-            onBack = {},
             onThemeChoice = {},
             onDynamicColor = {},
             onViewMode = {},

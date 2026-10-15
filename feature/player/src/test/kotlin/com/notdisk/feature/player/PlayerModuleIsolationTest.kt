@@ -53,9 +53,9 @@ class PlayerModuleIsolationTest {
 
     @Test
     fun `the player module declares no provider project dependency`() {
-        // `provider:` covers the concrete integrations (`:provider:p115`, `:provider:mock`) as well as
-        // the shared provider contract module (`:core:provider-api`), which is a legitimate dependency
-        // declared as `core:provider-api` and therefore does not match this pattern.
+        // `provider:` covers the concrete integrations (`:provider:p115`) as well as the shared
+        // provider contract module (`:core:provider-api`), which is a legitimate dependency declared
+        // as `core:provider-api` and therefore does not match this pattern.
         val forbidden = Regex("""project\(\s*":provider:""")
 
         assertFalse(
@@ -71,11 +71,12 @@ class PlayerModuleIsolationTest {
 
     @Test
     fun `the player module does not even reference a vendor by name`() {
-        // A blunt scan, on purpose. `p115` and `mock` are the two vendor identities this build has;
-        // neither has any business appearing in the player's build script under any spelling.
+        // A blunt scan, on purpose. `p115` is the only vendor identity this build ships, and it has
+        // no business appearing in the player's build script under any spelling. (`115` is included
+        // because it is the spelling a hurried author would reach for.)
         val buildScriptLower = buildScript.lowercase()
 
-        listOf("p115", "provider:mock", "115").forEach { token ->
+        listOf("p115", "115").forEach { token ->
             assertFalse(
                 "feature:player's build script mentions '$token'. A vendor name in this module is the " +
                     "first symptom of the coupling the module invariant forbids.",

@@ -13,8 +13,8 @@ API 封装成同一套文件系统、媒体播放与文件预览能力。
 
 | 维度 | 状态 |
 |---|---|
-| 工程可构建 | ✅ `./gradlew build` → `app-debug.apk`（约 25 MB，debug + release 双变体） |
-| 自动化测试 | ✅ **438 个测试全绿，0 失败**（含 Robolectric Compose 页面测试） |
+| 工程可构建 | ✅ `./gradlew build` → `app-debug.apk`（约 76 MB，debug + release 双变体） |
+| 自动化测试 | ✅ **393 个测试全绿，0 失败**（含 Robolectric Compose 页面测试） |
 | 115 接入 | ✅ 22 个端点已实现并测试；3 项刻意未实现（见下） |
 | **真实账号联调** | ❌ **未进行** —— 开发环境没有 115 账号与开发者凭据 |
 | OAuth 登录 | ⏸ 需要开发者 `app_id`，入口已就绪，**未伪造任何凭据** |
@@ -34,7 +34,7 @@ API 封装成同一套文件系统、媒体播放与文件预览能力。
 |---|---|---|
 | JDK | 17+（开发用 21） | AGP 8.10 要求 17+ |
 | Gradle | 8.13（wrapper 已内置） | 直接用 `./gradlew`，无需安装 |
-| Android SDK | compileSdk 35 / minSdk 26 | 需设置 `ANDROID_HOME` |
+| Android SDK | compileSdk 35 / **minSdk 35（仅 Android 15+）** | 需设置 `ANDROID_HOME` |
 | Kotlin | 2.1.0 | |
 | AGP | 8.10.1 | |
 
@@ -51,14 +51,30 @@ API 封装成同一套文件系统、媒体播放与文件预览能力。
 
 ### 首次使用
 
-应用内置一个**离线演示网盘（Mock）**，无需任何账号即可完整体验：
+应用**不含任何演示/模拟账号**（`provider:mock` 已从构建中整体删除）：所有内容都来自用户自己
+绑定的真实网盘，不存在「看起来能用但其实是假数据」的路径。
 
-1. 启动后进入「文件」页，默认使用 Mock 账号，可浏览目录树、分页、播放 HLS 视频、预览图片与文本；
-2. 「账号」页可添加 115 账号 —— **扫码登录不需要开发者凭据**，直接用 115 App 扫码即可；
+1. 启动后进入「文件」页，此时还没有账号，页面会说明并给出「去绑定账号」入口；
+2. 「设置 → 账号」中可添加 115 账号，两种方式都**不需要开发者凭据**：
+   - **扫码登录**：用 115 App 扫描屏幕上的二维码；
+   - **Cookie 登录**：浏览器登录 115 后，从开发者工具复制 `Cookie` 请求头粘贴进来
+     （需要包含 `UID`/`CID`/`SEID`/`KID`）。粘贴的凭据会先向 115 校验，通过后才写入
+     本机加密存储（Android Keystore），因此失效的 Cookie 不会留下一个「看似已绑定」的账号。
 3. 「设置」页可查看每个网盘的**能力声明**（哪些功能已实现、哪些未验证、哪些不支持）。
 
-Mock Provider 不是玩具：它与 115 Provider 实现**同一套契约**，并跑**同一套契约测试**，
-且刻意保留了与 115 相同的功能缺口，以便离线也能走到「该网盘不支持」的 UI 分支。
+### 首页的三种形态
+
+| 已绑定账号数 | 首页显示 |
+|---|---|
+| 0 | 空状态，说明如何绑定并给出「去绑定账号」入口 |
+| 1 | **直接显示该网盘的内容**，没有多余的一层 |
+| ≥2 | **每个网盘一个顶层文件夹**（以网盘显示名命名），点进去才是该网盘的内容 |
+
+同一网盘绑定两个账号时，两个顶层文件夹都会出现，并在网盘名后追加「 · 」与账号显示名
+以便区分（例如「115 网盘 · 张三」）。
+
+底部导航只有「文件」与「设置」两个标签；账号页不是顶级标签，入口在「设置 → 账号」。
+系统返回键在文件夹层级内**向上**（从网盘根目录回到网盘列表），只有无处可上时才退出应用。
 
 ---
 
@@ -75,7 +91,6 @@ app (MainActivity · 导航 · Hilt 图)
  ├── core:provider-api           CloudProvider 契约
  ├── core:model                  FileItem · MediaResource · CloudCapabilities
  ├── core:common                 CloudResult · CloudError · 日志脱敏
- ├── provider:mock               离线参考实现
  └── provider:p115               115 网盘真实接入
 ```
 
@@ -155,13 +170,13 @@ rid[0]=…&rid[1]=…      // rb/revert / rb/clean
 ./gradlew test
 ```
 
-438 个测试 = 纯 JVM 模块 144 个 + Android 模块 294 个（debug 与 release 变体各跑一遍，双倍确认）。
+393 个测试 = 纯 JVM 模块 144 个 + Android 模块 249 个（Android 模块的 debug 与 release 变体各跑一遍，用于双倍确认）。
 
 | 层次 | 位置 | 作用 |
 |---|---|---|
 | **共享契约测试** | `core:provider-testing` | 29 条规则，**所有 Provider 共用** |
 | **Compose 页面测试** | `feature/*/src/test`（Robolectric） | 状态分支可区分、无预览时有出路 |
-| Provider 行为测试 | `provider:mock/src/test` | 离线验证分页/错误/多账号/传输流 |
+| Provider 行为测试 | `provider:p115/src/test` | 用抓取文档中逐字记录的响应体验证分页/错误码/认证流程 |
 | Provider HTTP 测试 | `provider:p115/src/test` | 用**录制的真实响应体**验证映射与参数 |
 | UseCase 测试 | `core/domain/src/test` | 144 个测试，含「游标不前进」等边界 |
 | 架构守护测试 | `feature:player/src/test` | 断言播放器模块**没有** Provider 依赖 |

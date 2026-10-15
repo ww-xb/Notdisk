@@ -212,7 +212,20 @@ interface ProviderContractFixture {
 
 | Provider | 模块 | id | 认证 | 状态 |
 |---|---|---|---|---|
-| 115 网盘 | `provider:p115` | `p115` | 扫码登录（无需开发者凭据） | 22 个端点已实现并测试；3 项刻意未实现；真实联调待做 |
-| 离线演示网盘 | `provider:mock` | `mock` | QR / 手工凭据（全离线） | 参考实现，能力完整但**刻意保留与 115 相同的缺口** |
+| 115 网盘 | `provider:p115` | `p115` | `QR_CODE` / `MANUAL_CREDENTIAL`（粘贴会话 Cookie）；均无需开发者凭据 | 22 个端点已实现并测试；3 项刻意未实现；真实联调待做 |
 
-Mock 保留缺口是刻意的：若它什么都支持，UI 永远走不到「不支持」分支，那些分支会在真实账号上第一次运行时才暴露。
+**此前的 `provider:mock`（`mock`）已整体删除**（目录 `provider/mock/` 与 `settings.gradle.kts`
+的 `include(...)` 均已移除）。它曾是一个纯离线参考实现，能跑通同一套契约；但一个 Provider 若要
+在 APK 内**伪造账号与文件**，就存在被真实用户当成真实数据的风险，因此它不能从 release 构建可达。
+公共契约与平台无关这一点，现在由 `provider:p115` 接入 `ProviderContractRules` 来检验；
+`core:provider-testing` 仍然保留共享规则。
+
+### 6.1 `MANUAL_CREDENTIAL` 流程的契约要求
+
+粘贴会话 Cookie 的流程说明了「Provider 必须诚实」在本项目里的具体含义：
+
+1. 解析用户粘贴的 `Cookie` 头，要求 `UID` / `CID` / `SEID` / `KID` 四项（`USERSESSIONID` 可选）；
+   缺项时返回 `InvalidArgument`，而不是写入一个残缺的凭据。
+2. **先校验，再持久化**：凭据必须先向 `my.115.com/?ct=ajax&ac=nav` 校验通过，**之后**才写入加密
+   凭据存储，账号行也才创建。反过来做会留下一个「看似已绑定、首次点击才失败」的账号。
+3. 返回 `AuthChallenge.Completed` —— 凭据已经产生，**没有需要轮询的状态**；调用方据此立即刷新列表。

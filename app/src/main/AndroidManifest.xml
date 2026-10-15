@@ -22,13 +22,16 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.NotDisk"
-        tools:targetApi="34"
-        xmlns:tools="http://schemas.android.com/tools">
+        android:enableOnBackInvokedCallback="true">
 
         <!--
           allowBackup is false on purpose. The app stores account identifiers and encrypted
           credentials; an automatic backup would move them to another device outside the Keystore that
           protects them, which is exactly the property the encrypted store exists to provide.
+
+          enableOnBackInvokedCallback is declared because the app is API 35 only, where the
+          predictive-back gesture *is* the back mechanism. Leaving it off would make the system's own
+          back preview contradict what `NotDiskNavHost`'s `BackHandler` actually does.
         -->
 
         <activity

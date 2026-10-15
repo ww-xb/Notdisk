@@ -10,7 +10,19 @@ import org.gradle.kotlin.dsl.getByType
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 internal const val COMPILE_SDK = 35
-internal const val MIN_SDK = 26
+
+/**
+ * Android 15 (API 35) is the floor.
+ *
+ * A deliberate product decision rather than an oversight. The app targets one current platform so
+ * that edge-to-edge rendering, the predictive-back gesture and the platform's enforced window insets
+ * are *the* behaviour rather than one of several branches; supporting API 26 would mean carrying a
+ * second, permanently untested layout path for a device class this build does not target.
+ *
+ * A consequence worth naming: the dynamic-colour check in `NotDiskTheme` and the runtime-permission
+ * branches elsewhere are now statically true, so those paths are the only ones that exist.
+ */
+internal const val MIN_SDK = 35
 internal const val TARGET_SDK = 35
 
 internal val JAVA_VERSION: JavaVersion = JavaVersion.VERSION_17

@@ -30,7 +30,7 @@
 | 二维码图片（备用） | `qrcodeapi.115.com/api/1.0/web/1.0/qrcode` | GET | ✅ | ✅ | `AuthChallenge.QrCode.imageUrl` |
 | 轮询扫码状态 | `qrcodeapi.115.com/get/status/` | GET | ✅ | ✅ | `P115AuthProvider.pollChallenge` |
 | 扫码换票 | `passportapi.115.com/app/1.0/web/1.0/login/qrcode` | POST | ✅ | ✅ | `P115AuthProvider.exchangeForSession` |
-| 会话校验 | `my.115.com/?ct=ajax&ac=nav` | GET | ✅ | ✅ | `P115AuthProvider.verifyAccount` |
+| 会话校验 | `my.115.com/?ct=ajax&ac=nav` | GET | ✅ | ✅ | `P115AuthProvider.verifyAccount`；`MANUAL_CREDENTIAL` 流程也用它做**写入前**校验 |
 | 安全密钥状态 | `passportapi.115.com/app/1.0/web/8.2/user/security_key_status` | GET | ✅ | ✅ | `P115AuthProvider.isSafeKeySet` |
 | 登出 | `passportapi.115.com/app/1.0/web/1.0/logout/logout/` | POST | 📖 | ✅ | `P115AuthProvider.logout` |
 | RSA 公钥 | `passportapi.115.com/app/1.0/web/5.0.1/login/getKey` | GET | ✅ | ⏸ | 未接入密码登录流程 |
@@ -38,6 +38,23 @@
 | 短信二次验证 | `passportapi.115.com/app/1.0/web/1.0/code/sms/login` | POST | 📖 | ⏸ | 同上 |
 | 二次验证校验 | `passportapi.115.com/app/1.0/web/1.0/login/vip` | POST | 📖 | ⏸ | 同上 |
 | OAuth 2.0 token | `passportapi.115.com/app/1.0/1.0/token` | POST | 📖 | ⏸ | **需要开发者 app_id**，见 §6 |
+
+### 交互式授权流程
+
+115 声明**两条** `interactiveFlows`，都不需要开发者凭据：
+
+| 流程 | 说明 | 返回 |
+|---|---|---|
+| `QR_CODE` | 取二维码 token → 轮询扫码状态 → 换票 | 扫码完成后 `Succeeded` |
+| `MANUAL_CREDENTIAL` | 用户粘贴浏览器里 `Cookie` 请求头 | `Completed`（凭据已产生，**无轮询**） |
+
+`MANUAL_CREDENTIAL` 曾经以 `Unsupported` 被拒绝，现在已实现。要求与顺序：
+
+1. `P115CookieParser` 解析粘贴内容，**必须**含 `UID` / `CID` / `SEID` / `KID`（`USERSESSIONID` 可选）；
+   缺项返回 `InvalidArgument`，不写入残缺凭据。
+2. 凭据先向 `my.115.com/?ct=ajax&ac=nav` 校验；**通过后才**写入加密凭据存储，账号行随后才创建。
+   顺序反了就会留下「看似已绑定、首次点击才失败」的账号。
+3. 返回 `AuthChallenge.Completed`，调用方据此立即刷新账号列表。
 
 ### ⚠️ 实现中必须记住的两个陷阱（已在代码中处理）
 
@@ -358,6 +375,7 @@ CDN 校验 `Referer` / `Origin` / `User-Agent`（§1.4）。`MediaResource.heade
 | # | 项 | 风险 | 验证方式 |
 |---|---|---|---|
 | 1 | 扫码登录全链路 | 低（§2.1 为实测） | 用真实账号扫一次码 |
+| 1b | 粘贴 Cookie 登录（`MANUAL_CREDENTIAL`） | 低 — 解析与「先校验后写入」已有测试，未用真实 Cookie 跑过 | 从浏览器复制真实 `Cookie` 粘贴一次；再用一个失效 Cookie 确认**不会**留下账号行 |
 | 2 | 会话有效性、失效后重新授权 | 低 | 手动登出/等待过期 |
 | 3 | 根目录与多级目录浏览 | 低 | 浏览实际目录 |
 | 4 | 分页（大目录滚动到底） | 中 — `count` 语义文档未完全明确 | 找一个 >200 项的目录 |
@@ -383,6 +401,6 @@ CDN 校验 `Referer` / `Origin` / `User-Agent`（§1.4）。`MediaResource.heade
 | 错误码映射 | `api/P115ErrorMapping.kt` | `P115ProviderHttpTest`（1001 / 密钥错误 / POST-only） |
 | 文件标识 | `P115FileIdCodec.kt` + `P115PickcodeCache` | `P115ProviderContractTest`, `P115ProviderHttpTest` |
 | DTO → 领域模型 | `P115FileMapper.kt` | `P115ProviderHttpTest`（逐字段断言） |
-| 认证 | `auth/P115AuthProvider.kt` | `P115ProviderHttpTest`（QR 三步 + 凭据在响应体） |
+| 认证 | `auth/P115AuthProvider.kt`, `auth/P115CookieParser.kt` | `P115ProviderHttpTest`（QR 三步 + 凭据在响应体）、`P115CookieParserTest`（Cookie 解析 + 校验先于持久化） |
 | 能力声明 | `P115CloudProvider.kt` | `capabilities declare the documented and the unverified accurately` |
 | 共享契约 | — | `P115ProviderContractTest`（29 条规则） |

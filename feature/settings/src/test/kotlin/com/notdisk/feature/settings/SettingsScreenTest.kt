@@ -3,12 +3,17 @@ package com.notdisk.feature.settings
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.notdisk.core.common.logging.InMemoryCloudLogger
 import com.notdisk.core.database.settings.NotDiskSettingsStore
 import com.notdisk.core.designsystem.component.CapabilityState
 import com.notdisk.core.designsystem.theme.NotDiskTheme
 import com.notdisk.core.designsystem.theme.ThemeMode
+import com.notdisk.core.model.AccountId
+import com.notdisk.core.model.AuthState
 import com.notdisk.core.model.CapabilitySupport
+import com.notdisk.core.model.CloudAccount
 import com.notdisk.core.model.CloudCapabilities
 import com.notdisk.core.model.MediaCapabilities
 import com.notdisk.core.model.FileSystemCapabilities
@@ -37,7 +42,7 @@ import kotlin.test.assertTrue
  * absent, no `vmx`/`svm` on the CPU).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33])
+@Config(sdk = [35])
 class SettingsScreenTest {
 
     @get:Rule
@@ -97,7 +102,6 @@ class SettingsScreenTest {
                     state = state,
                     versionName = "0.1.0",
                     providerIds = state.providerCapabilities.map { it.providerId.value },
-                    onBack = {},
                     onThemeChoice = {},
                     onDynamicColor = {},
                     onViewMode = {},
@@ -224,6 +228,98 @@ class SettingsScreenTest {
         render(state())
 
         composeRule.onNodeWithText("0.1.0", substring = true).assertExists()
+    }
+
+    /**
+     * Account management lives here, because the bottom bar has no accounts tab.
+     *
+     * This is the whole reason the section grew from a count into a list: the settings screen is now
+     * the app's only route into account management, so it must both *show* the bound accounts (a user
+     * checking "is my 115 still logged in?" should not have to open a second screen) and *offer* the
+     * route to bind or remove one.
+     */
+    @Test
+    fun `bound accounts are listed with a route into account management`() {
+        var opened = false
+        renderWithAccounts(
+            accounts = listOf(
+                CloudAccount(
+                    accountId = AccountId("acct-1"),
+                    providerId = ProviderId("p115"),
+                    remoteUserId = "20856775",
+                    displayName = "wwxb",
+                    authState = AuthState.AUTHORIZED,
+                    membershipLabel = "年费VIP",
+                ),
+            ),
+            onOpenAccounts = { opened = true },
+        )
+
+        // The account's identity and its state must both be visible without leaving this screen.
+        composeRule.onNodeWithText("wwxb", substring = true).assertExists()
+        composeRule.onNodeWithText("已授权", substring = true).assertExists()
+
+        // Scrolled to first: the accounts section sits below several other sections, and Robolectric's
+        // default surface is shorter than a phone, so an un-scrolled node is reported as not
+        // displayed (and `performClick` refuses it) even though a device would show it.
+        composeRule.onNodeWithText("管理账号", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        assertTrue(opened, "settings must be able to reach account management")
+    }
+
+    /**
+     * An expired account must read as expired *here* too.
+     *
+     * The settings summary is where a user checks whether their session still works; reporting only a
+     * count would make an expired credential indistinguishable from a working one until the files
+     * screen failed.
+     */
+    @Test
+    fun `an expired account is labelled as expired in settings`() {
+        renderWithAccounts(
+            accounts = listOf(
+                CloudAccount(
+                    accountId = AccountId("acct-1"),
+                    providerId = ProviderId("p115"),
+                    remoteUserId = "20856775",
+                    displayName = "wwxb",
+                    authState = AuthState.EXPIRED,
+                ),
+            ),
+        )
+
+        composeRule.onNodeWithText("已过期", substring = true).assertExists()
+    }
+
+    /** Renders the screen with a specific account list, so the summary section can be asserted on. */
+    private fun renderWithAccounts(
+        accounts: List<CloudAccount>,
+        onOpenAccounts: () -> Unit = {},
+    ) {
+        composeRule.setContent {
+            NotDiskTheme(themeMode = ThemeMode.LIGHT, dynamicColor = false) {
+                SettingsScreen(
+                    state = state().copy(accounts = accounts),
+                    versionName = "0.1.0",
+                    providerIds = listOf("p115"),
+                    onThemeChoice = {},
+                    onDynamicColor = {},
+                    onViewMode = {},
+                    onDefaultSort = {},
+                    onSortAscending = {},
+                    onNaturalSort = {},
+                    onPageSize = {},
+                    onLoadThumbnails = {},
+                    onPreferOriginalImage = {},
+                    onRecordRecents = {},
+                    onOpenAccounts = onOpenAccounts,
+                    onRefreshDiagnostics = {},
+                    onClearDiagnostics = {},
+                )
+            }
+        }
     }
 }
 

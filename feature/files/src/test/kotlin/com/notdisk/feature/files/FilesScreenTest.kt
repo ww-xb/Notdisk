@@ -10,7 +10,9 @@ import com.notdisk.core.database.settings.NotDiskSettingsStore
 import com.notdisk.core.designsystem.theme.NotDiskTheme
 import com.notdisk.core.designsystem.theme.ThemeMode
 import com.notdisk.core.model.AccountId
+import com.notdisk.core.model.AuthState
 import com.notdisk.core.model.CapabilitySupport
+import com.notdisk.core.model.CloudAccount
 import com.notdisk.core.model.FileCapabilities
 import com.notdisk.core.model.FileId
 import com.notdisk.core.model.FileItem
@@ -38,7 +40,7 @@ import kotlin.test.assertTrue
  * the JVM, which is sufficient for structural assertions about which branch rendered.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33])
+@Config(sdk = [35])
 class FilesScreenTest {
 
     @get:Rule
@@ -83,9 +85,16 @@ class FilesScreenTest {
         isLoadingMore: Boolean = false,
         error: String? = null,
         capabilities: FileActionAvailability = fullCapabilities,
+        level: ScreenLevel = ScreenLevel.ACCOUNT_ROOT_SINGLE,
+        knownAccounts: List<CloudAccount> = listOf(previewAccount()),
     ) = FilesUiState(
         providerId = providerId,
         accountId = accountId,
+        // Defaulted to "a cloud is open at its root", which is the level every folder-listing
+        // assertion below is about. Leaving this at the type's own default (`EMPTY`) would render
+        // the no-accounts screen for every unrelated case.
+        level = level,
+        knownAccounts = knownAccounts,
         breadcrumb = breadcrumb,
         items = items,
         isLoading = isLoading,
@@ -94,6 +103,19 @@ class FilesScreenTest {
         viewMode = NotDiskSettingsStore.ViewMode.LIST,
         capabilities = capabilities,
         providerDisplayName = "115 网盘",
+    )
+
+    /** A bound account, so the single/multi-account rules have something to reason about. */
+    private fun previewAccount(
+        id: String = "acct-1",
+        name: String = "wwxb",
+    ) = CloudAccount(
+        accountId = AccountId(id),
+        providerId = providerId,
+        remoteUserId = "20856775",
+        displayName = name,
+        authState = AuthState.AUTHORIZED,
+        addedAt = 1_700_000_000_000L,
     )
 
     private fun render(
@@ -122,6 +144,84 @@ class FilesScreenTest {
                 )
             }
         }
+    }
+
+    /**
+     * The first-run screen must say how to bind a cloud *and* be reachable from here.
+     *
+     * The bottom bar has no accounts tab, so this screen is where a user with no account lands. Copy
+     * that only said "no account" would leave them with no route to the login screen at all.
+     */
+    @Test
+    fun `no bound account explains how to bind one`() {
+        render(
+            state(
+                level = ScreenLevel.EMPTY,
+                knownAccounts = emptyList(),
+                breadcrumb = emptyList(),
+                items = emptyList(),
+            ),
+        )
+
+        composeRule.onNodeWithText("还没有绑定网盘账号", substring = true).assertExists()
+        composeRule.onNodeWithText("去绑定账号", substring = true).assertExists()
+        // An empty *account list* must not be reported as an empty folder: the two are different
+        // situations with different remedies.
+        composeRule.onNodeWithText("这个文件夹是空的", substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * Two accounts: each cloud is a top-level folder, named after the netdisk.
+     *
+     * The brief's "有一个以上账号时 用网盘名作为顶层文件夹". The rows must be *openable*, which is why the
+     * test taps one and asserts the id the callback received rather than only that it rendered.
+     */
+    @Test
+    fun `several accounts render as openable top-level folders`() {
+        var opened: String? = null
+        render(
+            state(
+                level = ScreenLevel.HOME_MULTI,
+                knownAccounts = listOf(previewAccount("a1", "wwxb"), previewAccount("a2", "第二账号")),
+                breadcrumb = emptyList(),
+                // The row's id *is* the account id: that is what makes two accounts of one provider
+                // distinguishable, and the screen must pass it through unchanged.
+                items = listOf(
+                    folder("a1", "115 网盘 · wwxb"),
+                    folder("a2", "115 网盘 · 第二账号"),
+                ),
+            ),
+            onOpenFolder = { opened = it.id.value },
+        )
+
+        composeRule.onNodeWithText("115 网盘 · wwxb", substring = true).assertExists().performClick()
+        assertTrue(
+            opened == "a1" || opened?.endsWith("a1") == true,
+            "a cloud row must open by its account id, got $opened",
+        )
+    }
+
+    /**
+     * The account picker offers no folder actions.
+     *
+     * Creating a folder, sorting, or switching to a grid all presuppose a *listing* of remote files.
+     * At the picker the rows are clouds, so offering "new folder" would have to invent which drive it
+     * meant — and the FAB is the most inviting control on the screen.
+     */
+    @Test
+    fun `the account picker offers no folder actions`() {
+        render(
+            state(
+                level = ScreenLevel.HOME_MULTI,
+                knownAccounts = listOf(previewAccount("a1"), previewAccount("a2")),
+                breadcrumb = emptyList(),
+                items = listOf(folder("a1", "115 网盘"), folder("a2", "阿里云盘")),
+            ),
+        )
+
+        composeRule.onNodeWithContentDescription("新建文件夹").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("排序方式").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("切换到网格视图").assertDoesNotExist()
     }
 
     /** A folder and a file both render, with their names visible. */

@@ -70,7 +70,13 @@ data class ProviderDescriptor(
      * rather than hidden behind a failing button. Empty when nothing is required.
      */
     val configurationNotes: List<String> = emptyList(),
-    /** `true` for offline development providers such as `provider:mock`. */
+    /**
+     * `true` for a provider that exists only for development.
+     *
+     * No such provider ships in this build — the offline demo provider was removed so that a build
+     * cannot present fabricated accounts as real ones — but the flag stays meaningful for a future
+     * developer-only integration, and the UI renders a badge when it is set.
+     */
     val isDevelopmentOnly: Boolean = false,
 )
 

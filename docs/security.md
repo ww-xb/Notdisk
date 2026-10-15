@@ -37,6 +37,23 @@
 - `P115AuthProvider.persistSession` 显式读取 `data.cookie`。
 - 有测试固定这一点：`qr flow extracts credentials from the response body`。
 
+### 2.1.1 粘贴 Cookie 登录（`MANUAL_CREDENTIAL`）
+
+除扫码外，115 还声明 `MANUAL_CREDENTIAL`：用户从浏览器开发者工具复制 `Cookie` 请求头粘贴。
+该流程**曾经以 `Unsupported` 被拒绝**，其中「手工输入难以安全存储」这一半理由并不成立 ——
+粘贴的凭据进入的是与扫码**完全相同**的加密存储（`P115EncryptedCredentialStore`，
+Android Keystore 支持），静态存储的安全性没有差别。真实的取舍只有一条：粘贴的 Cookie 会短暂
+存在于剪贴板，这是用户自己的选择。
+
+安全上的关键顺序是**先校验、后持久化**：
+
+1. `P115CookieParser` 解析粘贴内容，要求 `UID` / `CID` / `SEID` / `KID`（`USERSESSIONID` 可选）；
+2. 凭据先向 `my.115.com/?ct=ajax&ac=nav` 校验；
+3. **只有校验通过**，凭据才写入加密存储，账号行才创建。
+
+若顺序反过来，一个失效或被截断的 Cookie 会留下一个「看似已绑定、首次点击才失败」的账号。
+该流程返回 `AuthChallenge.Completed`（凭据已产生，没有需要轮询的状态）。
+
 ### 2.2 存储要求
 
 ```kotlin
@@ -181,7 +198,7 @@ Token: POST passportapi.115.com/app/1.0/1.0/token?grant_type=authorization_code&
 
 | 项 | 用途 | 缺失影响 |
 |---|---|---|
-| 115 `app_id` + 回调地址 | OAuth 登录 | 无法启用 OAuth；扫码登录仍然可用（**不需要开发者凭据**） |
+| 115 `app_id` + 回调地址 | OAuth 登录 | 无法启用 OAuth；扫码登录与粘贴 Cookie 登录仍然可用（**都不需要开发者凭据**） |
 | 测试账号 | 真实联调 | 见 `docs/api-mapping.md` §10.2 |
 
 ---
@@ -198,3 +215,4 @@ Token: POST passportapi.115.com/app/1.0/1.0/token?grant_type=authorization_code&
 - [ ] 写操作的 `idempotentWrites` 按最坏情况声明，且未自动重试
 - [ ] 若某流程需要服务端密钥，已在此文档中如实记录，而非用不安全方案绕过
 - [ ] 传输任务记录中不含任何 URL
+- [ ] 用户粘贴/手工输入的凭据**先向厂商校验、通过后才持久化**（校验失败的凭据不得留下账号行）

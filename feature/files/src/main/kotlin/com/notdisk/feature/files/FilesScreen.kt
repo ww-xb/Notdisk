@@ -1,5 +1,6 @@
 package com.notdisk.feature.files
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,6 +64,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.notdisk.core.database.settings.NotDiskSettingsStore
 import com.notdisk.core.designsystem.component.CloudFileGridTile
@@ -102,6 +107,10 @@ import com.notdisk.core.model.ProviderId
  * also exactly a `CloudFileKey`, i.e. the only file reference that stays valid across a process
  * death; a serialised `FileItem` would drag a possibly-stale cached row through navigation.
  *
+ * @param viewModel the browser's state machine. Injected rather than resolved with a bare
+ *   `hiltViewModel()` because the app's navigation host needs the *same* instance to route the
+ *   system back press through (see `NotDiskNavHost`); two instances would each keep their own
+ *   breadcrumb, and back would appear to do nothing.
  * @param onOpenMedia invoked when the user asks to play a file the provider can stream.
  * @param onOpenPreview invoked when the user asks to preview a file the provider can render inline.
  */
@@ -113,6 +122,42 @@ fun FilesRoute(
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // ### Why the account list is re-read when the screen resumes
+    // Accounts are bound on the settings tab (the bottom bar has no accounts tab), and this
+    // destination is never popped, so its ViewModel survives that round trip. Without this, a user
+    // who bound their first cloud in settings and came back would still see the "no account" screen
+    // — and would have to restart the app to see their files.
+    //
+    // The call is cheap and deliberately position-preserving: it redraws only when the account set
+    // actually changes the level (see `FilesViewModel.refreshAccounts`), so answering a permission
+    // dialog mid-folder does not throw the user back to the cloud's root.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshAccounts()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // ### Why the system back gesture is handled here
+    // Folder navigation is not a navigation-graph concern: this ViewModel keeps its own breadcrumb,
+    // so `NavHost`'s back stack only ever holds the home screen plus player/preview. Without this
+    // handler a back press at folder depth 3 fell straight through to the Activity and closed the
+    // app — the reported "返回键直接退出APP了 而不是返回上层文件夹".
+    //
+    // The handler is *disabled* when `canGoUp` is false, which is what keeps the two directions
+    // honest: with a folder above, back goes up; with nothing above (a single-account root, or the
+    // empty state), the handler is not installed, so the platform's default — leaving the app —
+    // runs. A handler that always consumed would trap the user in the app instead.
+    //
+    // It lives in this route rather than in the app's nav host because this is where the ViewModel is
+    // scoped: resolving the same instance from the host would need `getBackStackEntry`, which throws
+    // during the first composition and would give the host a second, divergent back stack.
+    BackHandler(enabled = state.canGoUp) {
+        viewModel.navigateUp()
+    }
 
     FilesScreen(
         state = state,
@@ -129,6 +174,7 @@ fun FilesRoute(
         onDismissError = viewModel::dismissError,
         onOpenMedia = onOpenMedia,
         onOpenPreview = onOpenPreview,
+        onGoHome = viewModel::goHome,
         modifier = modifier,
     )
 }
@@ -178,6 +224,7 @@ fun FilesScreen(
     onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
     modifier: Modifier = Modifier,
     onSearchRequested: (() -> Unit)? = null,
+    onGoHome: () -> Unit = {},
 ) {
     var showCreateFolderDialog by rememberSaveable { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<FileItem?>(null) }
@@ -205,47 +252,61 @@ fun FilesScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = state.currentFolder?.name ?: "文件",
+                        text = state.titleFor(),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 },
                 navigationIcon = {
                     // Rendered only when going up is possible. An always-present back arrow that
-                    // sometimes does nothing trains the user to stop trusting it.
+                    // sometimes does nothing trains the user to stop trusting it, and at the home
+                    // level up would re-render the same screen.
                     if (state.canGoUp) {
                         IconButton(onClick = onNavigateUp) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回上一级",
+                                contentDescription = if (state.breadcrumb.size > 1) {
+                                    "返回上一级"
+                                } else {
+                                    "返回账号列表"
+                                },
                             )
                         }
                     }
                 },
                 actions = {
-                    IconButton(onClick = onRefresh, enabled = !state.isLoading && !state.isRefreshing) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
-                    }
-                    IconButton(onClick = onToggleViewMode) {
-                        val toGrid = state.viewMode == NotDiskSettingsStore.ViewMode.LIST
-                        Icon(
-                            imageVector = if (toGrid) Icons.Filled.GridView else Icons.AutoMirrored.Filled.ViewList,
-                            contentDescription = if (toGrid) "切换到网格视图" else "切换到列表视图",
-                        )
-                    }
-                    Box {
-                        IconButton(onClick = { sortMenuExpanded = true }) {
-                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+                    // Sorting, view mode and folder creation are listing affordances. At the home
+                    // level the rows are clouds, so none of them has a meaning there and the whole
+                    // action row is hidden rather than shown inert.
+                    if (state.isListingFolder) {
+                        IconButton(onClick = onRefresh, enabled = !state.isLoading && !state.isRefreshing) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                         }
-                        SortMenu(
-                            expanded = sortMenuExpanded,
-                            current = state.sort,
-                            onDismiss = { sortMenuExpanded = false },
-                            onSelect = { field, ascending ->
-                                sortMenuExpanded = false
-                                onSetSort(field, ascending)
-                            },
-                        )
+                        IconButton(onClick = onToggleViewMode) {
+                            val toGrid = state.viewMode == NotDiskSettingsStore.ViewMode.LIST
+                            Icon(
+                                imageVector = if (toGrid) Icons.Filled.GridView else Icons.AutoMirrored.Filled.ViewList,
+                                contentDescription = if (toGrid) "切换到网格视图" else "切换到列表视图",
+                            )
+                        }
+                        Box {
+                            IconButton(onClick = { sortMenuExpanded = true }) {
+                                Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+                            }
+                            SortMenu(
+                                expanded = sortMenuExpanded,
+                                current = state.sort,
+                                onDismiss = { sortMenuExpanded = false },
+                                onSelect = { field, ascending ->
+                                    sortMenuExpanded = false
+                                    onSetSort(field, ascending)
+                                },
+                            )
+                        }
+                    } else {
+                        IconButton(onClick = onRefresh, enabled = !state.isLoading) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "刷新账号列表")
+                        }
                     }
                     // Hidden entirely rather than disabled: a search that cannot run is not a
                     // "currently unavailable" control, it is a provider that has no such endpoint.
@@ -258,7 +319,9 @@ fun FilesScreen(
             )
         },
         floatingActionButton = {
-            if (state.capabilities.canCreateFolder) {
+            // A folder is created *inside a cloud*, so the affordance only exists once one is open.
+            // At the home level there would be no account to create it in.
+            if (state.isListingFolder && state.capabilities.canCreateFolder) {
                 FloatingActionButton(onClick = { showCreateFolderDialog = true }) {
                     Icon(Icons.Filled.CreateNewFolder, contentDescription = "新建文件夹")
                 }
@@ -270,10 +333,10 @@ fun FilesScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            if (state.breadcrumb.isNotEmpty()) {
+            if (state.isListingFolder && state.breadcrumb.isNotEmpty()) {
                 FilePathBreadcrumb(
                     // `id to label`: the id is what navigation uses, the label is what the user
-                    // reads. The root's own name is "根目录" rather than an empty string.
+                    // reads. The root's own name is the cloud's name, not an empty string.
                     path = state.breadcrumb.map { it.id.value to it.name },
                     onCrumbClick = { crumbId ->
                         val index = state.breadcrumb.indexOfFirst { it.id.value == crumbId }
@@ -289,18 +352,21 @@ fun FilesScreen(
             // A refresh replaces neither the rows nor the breadcrumb, so without this the gesture
             // would look like it did nothing at all until the list quietly changed. A determinate
             // bar that is always composed (and simply transparent when idle) keeps the layout from
-            // jumping by 4dp every time a refresh starts.
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(Dimens.ProgressTrack),
-                color = if (state.isRefreshing) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    Color.Transparent
-                },
-                trackColor = Color.Transparent,
-            )
+            // jumping by 4dp every time a refresh starts. It is not shown at the home level, where
+            // there is no listing to refresh.
+            if (state.isListingFolder) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(Dimens.ProgressTrack),
+                    color = if (state.isRefreshing) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        Color.Transparent
+                    },
+                    trackColor = Color.Transparent,
+                )
+            }
 
             when {
                 state.isLoading && state.items.isEmpty() ->
@@ -321,13 +387,39 @@ fun FilesScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
 
-                state.isUnbound ->
+                state.isNoAccounts ->
+                    // **The** first-run screen: no account is bound. It must say how to bind one
+                    // *and* offer the route, because the bottom bar deliberately has no accounts tab
+                    // and a user who cannot find the login screen has no way forward.
                     EmptyState(
-                        title = "尚未选择网盘账号",
+                        title = "还没有绑定网盘账号",
                         icon = Icons.Filled.FolderOff,
-                        description = "请先在「账号」页面添加并选择一个网盘账号，再回到这里浏览文件。",
+                        description = "到「设置 → 账号」中登录 115 网盘。只有一个账号时，这里会直接显示该网盘的内容；" +
+                            "绑定多个账号后，会先按网盘名分组显示。",
+                        actionLabel = "去绑定账号",
+                        onAction = onGoHome,
                         modifier = Modifier.fillMaxSize(),
                     )
+
+                state.isAccountPicker ->
+                    // Two or more clouds: the rows *are* the clouds, so an empty list here can only
+                    // mean the account list is mid-update.
+                    if (state.items.isEmpty()) {
+                        EmptyState(
+                            title = "正在准备账号列表",
+                            icon = Icons.Filled.FolderOff,
+                            description = "已连接的账号会以网盘名作为顶层文件夹显示。",
+                            actionLabel = "刷新",
+                            onAction = onRefresh,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        FileContent(
+                            state = state,
+                            onLoadMore = onLoadMore,
+                            callbacks = callbacks,
+                        )
+                    }
 
                 state.items.isEmpty() ->
                     EmptyState(
@@ -436,6 +528,11 @@ fun FilesScreen(
  *
  * Split out of [FilesScreen] because the branch above answers *whether* there is content while this
  * answers *what it looks like*; the two change for different reasons.
+ *
+ * ### Why the account picker ignores the grid preference
+ * The grid is a way to scan *many* files visually. The home level holds a handful of clouds, each of
+ * which needs its *name* read to be useful — a grid of unlabelled tiles would be strictly worse. The
+ * chosen view mode therefore resumes as soon as a cloud is opened.
  */
 @Composable
 private fun FileContent(
@@ -443,6 +540,18 @@ private fun FileContent(
     onLoadMore: () -> Unit,
     callbacks: FileItemCallbacks,
 ) {
+    if (state.isAccountPicker) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(vertical = Dimens.XSmall),
+        ) {
+            items(items = state.items, key = { it.id.value }) { account ->
+                CloudAccountRow(account = account, onClick = { callbacks.onOpen(account) })
+            }
+        }
+        return
+    }
+
     when (state.viewMode) {
         NotDiskSettingsStore.ViewMode.LIST -> LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -470,6 +579,36 @@ private fun FileContent(
             }
         }
     }
+}
+
+/**
+ * One row of the home level: a bound cloud, presented as a top-level folder.
+ *
+ * The row is a *synthetic* folder (see `FilesViewModel.homeItemsFor`), so every per-item action a
+ * real remote object has — rename, delete, details, play — is deliberately absent. Only "open" is
+ * offered, which is exactly what the row means.
+ */
+@Composable
+private fun CloudAccountRow(account: FileItem, onClick: () -> Unit) {
+    CloudFileListTile(
+        name = account.name,
+        isFolder = true,
+        onClick = onClick,
+        sizeText = null,
+        // The subtitle names the cloud's own id rather than a count, because with two accounts of
+        // the same provider the *name* is the only thing that tells them apart, and the row above
+        // already shows it. Showing the provider id here is the honest secondary line.
+        subtitleText = account.providerId.value,
+        mimeType = null,
+        enabled = true,
+    )
+}
+
+/** The screen title for the level currently on screen. */
+private fun FilesUiState.titleFor(): String = when {
+    isAccountPicker -> "全部网盘"
+    isNoAccounts -> "文件"
+    else -> currentFolder?.name ?: "文件"
 }
 
 /**

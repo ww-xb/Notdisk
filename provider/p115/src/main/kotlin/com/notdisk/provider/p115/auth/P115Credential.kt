@@ -48,29 +48,41 @@ data class P115Credential(
      * Renders the cookie header exactly as the vendor's own front-end would.
      *
      * The order is fixed (`USERSESSIONID` first, matching §1.4's example) so that captured requests
-     * are byte-comparable during debugging, and `null`/blank members are omitted rather than sent
-     * as empty values.
+     * are byte-comparable during debugging, and `null`/blank members are omitted rather than sent as
+     * empty values. The omission is not cosmetic: §2.1 records that `USERSESSIONID` is absent from
+     * some login responses, and a header carrying `USERSESSIONID=` with no value is a *malformed
+     * session* the vendor may reject outright — turning a working credential into a failed one.
      */
     fun cookieHeader(): String = buildString {
-        append("USERSESSIONID=").append(userSessionId)
-        append("; UID=").append(uid)
-        append("; CID=").append(cid)
-        append("; SEID=").append(seid)
-        append("; KID=").append(kid)
-        if (!phpSessionId.isNullOrBlank()) append("; PHPSESSID=").append(phpSessionId)
+        appendCookie("USERSESSIONID", userSessionId)
+        appendCookie("UID", uid)
+        appendCookie("CID", cid)
+        appendCookie("SEID", seid)
+        appendCookie("KID", kid)
+        appendCookie("PHPSESSID", phpSessionId)
+    }
+
+    /** Appends `[; ]NAME=value`, skipping a blank value and the separator it would need. */
+    private fun StringBuilder.appendCookie(name: String, value: String?) {
+        if (value.isNullOrBlank()) return
+        if (isNotEmpty()) append("; ")
+        append(name).append('=').append(value)
     }
 
     /**
      * True when the credential is structurally usable.
      *
-     * Deliberately checks presence, not validity: only the server can say whether a session is
-     * still alive (`my.115.com/?ct=ajax&ac=nav`). A structurally-complete-but-expired credential is
-     * exactly the case that must produce a `TokenExpired` from a *server* call rather than a local
-     * "not logged in" guess.
+     * Deliberately checks presence, not validity: only the server can say whether a session is still
+     * alive (`my.115.com/?ct=ajax&ac=nav`). A structurally-complete-but-expired credential is exactly
+     * the case that must produce a `TokenExpired` from a *server* call rather than a local "not
+     * logged in" guess.
+     *
+     * `USERSESSIONID` is deliberately **not** required: §2.1 Step 4 records that `webapi.115.com`
+     * authenticates with `UID`/`CID`/`SEID`/`KID`, and that the web front-end's own ticket is absent
+     * on some responses. Requiring it here would reject a pasted cookie the vendor accepts.
      */
     val isComplete: Boolean
-        get() = userSessionId.isNotBlank() &&
-            uid.isNotBlank() &&
+        get() = uid.isNotBlank() &&
             cid.isNotBlank() &&
             seid.isNotBlank() &&
             kid.isNotBlank()

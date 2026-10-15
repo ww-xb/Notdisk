@@ -13,10 +13,11 @@ android {
 
     defaultConfig {
         applicationId = "com.notdisk.app"
-        minSdk = 26
+        // Android 15+ only. See `build-logic/.../ProjectExtensions.kt` for why the floor is 35.
+        minSdk = 35
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -63,7 +64,10 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:provider-api"))
     implementation(project(":core:designsystem"))
-    implementation(project(":provider:mock"))
+    // The only shipped provider. The offline demo provider (`provider:mock`) was removed from the
+    // build entirely: a provider that fabricates accounts and files must not be reachable from a
+    // release APK, and keeping it behind a build flag would leave a fake-account code path one
+    // property away from shipping.
     implementation(project(":provider:p115"))
     implementation(project(":feature:accounts"))
     implementation(project(":feature:files"))

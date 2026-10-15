@@ -43,7 +43,7 @@ import kotlin.test.assertTrue
  * Those remain unverified on-device — see `docs/testing.md` §5.1.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33])
+@Config(sdk = [35])
 class PreviewScreenTest {
 
     @get:Rule

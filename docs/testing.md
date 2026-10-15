@@ -9,12 +9,16 @@
 | 层 | 位置 | 依赖 | 目的 |
 |---|---|---|---|
 | **共享契约测试** | `core:provider-testing` | 无 | 一套 29 条规则，**所有** Provider 共用，保证抽象不被某一家网盘带偏 |
-| **Provider 行为测试** | `provider:mock/src/test` | 无 | 离线验证分页、错误语义、多账号、传输流、媒体刷新 |
-| **Provider HTTP 测试** | `provider:p115/src/test` | MockWebServer | 用**录制的真实响应体**验证 DTO 映射、请求参数、错误码 |
+| **Provider HTTP / 行为测试** | `provider:p115/src/test` | MockWebServer | 用**录制的真实响应体**验证 DTO 映射、请求参数、错误码、分页游标与认证流程 |
 | **单元测试** | `core:designsystem/src/test` 等 | 无 | 纯函数（格式化器等） |
 | **Compose UI 测试** | `feature/*/src/test` | Robolectric（JVM） | 关键页面的状态分支（见 §5.3） |
 
 设计取舍：**把最多精力放在共享契约测试上**。它的价值在于「一次编写、约束所有当前与未来的 Provider」，而不是覆盖某个厂商的分支细节。
+
+> `provider:mock` 模块已**整体删除**（`provider/mock/` 目录与 `settings.gradle.kts` 中的
+> `include(...)` 均已移除），因此测试分层里不再有「离线行为测试」这一层。删除理由是它会在
+> release APK 内伪造账号与文件：一个能凭空造出账号与文件列表的 Provider，一旦随应用发布，
+> 用户就可能把假数据当成真实数据。共享契约规则仍然存在，由 `provider:p115` 接入。
 
 ---
 
@@ -24,8 +28,7 @@
 任何 Provider 只需提供一个 `ProviderContractFixture` 即可接入：
 
 ```kotlin
-class MockCloudProviderContractTest : ProviderContractRules(MockProviders.contractFixture())
-class P115ProviderContractTest        : ProviderContractRules(P115ContractFixture.build())
+class P115ProviderContractTest : ProviderContractRules(P115ContractFixture.build())
 ```
 
 `ProviderContractFixture` 要求提供少量**真值**（一个可列出的目录、一个不存在的 id、一个可播放文件…），规则本身**不提及任何具体文件 id**，因此可复用。
@@ -78,7 +81,7 @@ class P115ProviderContractTest        : ProviderContractRules(P115ContractFixtur
 
 ## 3. 115 Provider 的 HTTP 测试
 
-`provider/p115/src/test/.../P115ProviderHttpTest.kt`（34 个测试）对本地 `MockWebServer` 驱动真实 Provider。
+`provider/p115/src/test/.../P115ProviderHttpTest.kt`（35 个测试）对本地 `MockWebServer` 驱动真实 Provider。
 
 ### 3.1 为什么用 MockWebServer 而不是 mock 掉映射器
 
@@ -111,6 +114,7 @@ class P115ProviderContractTest        : ProviderContractRules(P115ContractFixtur
 | `a server error does not invalidate the stored credential` | §12：网络故障不得导致登出 |
 | `integer state envelopes are accepted` | §1.3：`state` 在认证接口是 `1/0` |
 | `qr flow extracts credentials from the response body` | §2.1 Step 3：**凭据在响应体，不在 `Set-Cookie`** |
+| `manual credential flow verifies before persisting` | 粘贴的 Cookie 必须先经 `ac=nav` 校验，**通过后才**写入存储、才创建账号行 |
 | `a cancelled scan is reported as a terminal failure` | §2.1 Step 2：`status: -1` |
 | `an invalid qr key ends the challenge as retryable` | §2.1 Step 2：`errno 40199002` |
 | `media resolution resolves a missing pickcode via get_info` | §1.5：pickcode 不是身份，但需要可解析 |
@@ -129,22 +133,18 @@ class P115ProviderContractTest        : ProviderContractRules(P115ContractFixtur
 
 ---
 
-## 4. Mock Provider 的行为测试
+## 4. 已删除的 Mock Provider
 
-`provider/mock/src/test/.../MockProviderBehaviourTest.kt`（40 个测试）验证离线可覆盖的业务语义：
+`provider:mock`（`provider/mock/src/test/.../MockProviderBehaviourTest.kt` 等 70 个测试）**已随模块整体删除**，
+本节保留一条说明而不是留下一堆失效路径：
 
-- 多账号隔离（新增/登出其一不影响另一个）；
-- 会话失效 → `TokenExpired`，且数据调用一并失败；
-- 空目录是**成功的空页**，无权限目录是 `PermissionDenied`（二者 UI 表现不同）；
-- 分页遍历每个子项**恰好一次**；
-- 排序（文件夹始终在前）与后缀/分类过滤；
-- 批量操作报告**逐项**结果（部分成功）；
-- 回收站删除 → 列表 → 还原的完整闭环；
-- 传输进度流**会终止**（不终止会让 `collect` 永久挂起）；
-- 上传不可自动重试，下载可重试；
-- 媒体 URL 过期后重新解析产生**不同的** URL；
-- 预览分类覆盖每种类别；`resolveAccess=false` 不返回访问材料；
-- 能力声明的缺口与 115 保持一致。
+- 目录 `provider/mock/` 已删除，`settings.gradle.kts` 中的 `include(":provider:mock")` 已移除；
+- `core:provider-testing` **保留**，共享 `ProviderContractRules` 仍在，由 `provider:p115/src/test` 接入；
+- 删除理由：该 Provider 会**凭空伪造账号与文件**。它能跑通契约，也正因如此，一旦随 release APK 发布，
+  用户就可能把假数据当成自己网盘里的真实内容。测试用的替身必须是**测试专用**的，不能成为可发布的 Provider。
+
+因此「离线也能走到『厂商不支持』分支」这一目标改由别的途径保证：录制响应体驱动的 `provider:p115` HTTP 测试，
+以及各 feature 模块的 Compose 状态分支测试。
 
 ---
 
@@ -160,8 +160,8 @@ cd <项目根目录>
 gradle clean build --console=plain
 ```
 
-结果：**BUILD SUCCESSFUL in 2m 1s**，`app-debug.apk` 产出（25,271,738 bytes，
-`applicationId = com.notdisk.app`，`versionName = 0.1.0`，读取自 AGP 生成的
+结果：**BUILD SUCCESSFUL**，`app-debug.apk` 产出（76,263,389 bytes，
+`applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`，读取自 AGP 生成的
 `output-metadata.json`，非猜测）。`build` 同时跑了 debug 与 release 两个变体。
 
 ### 各模块测试数（去重后，每个测试计一次）
@@ -169,21 +169,23 @@ gradle clean build --console=plain
 | 模块 | 测试数 | 失败 |
 |---|---|---|
 | `core:domain`（UseCase，含游标不前进等边界） | 144 | 0 |
-| `provider:mock`（共享契约 29 + 行为 41） | 70 | 0 |
-| `provider:p115`（共享契约 29 + HTTP 34） | 63 | 0 |
+| `provider:p115`（共享契约 29 + HTTP 35 + **Cookie 解析 10**） | 74 | 0 |
 | `core:network`（超时/取消/重试/脱敏） | 33 | 0 |
 | `feature:player`（错误映射 + 刷新上限 + **架构隔离守卫**） | 32 | 0 |
-| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支**） | 31 | 0 |
 | `core:designsystem`（格式化器） | 28 | 0 |
+| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支** + **首页三级规则**） | 43 | 0 |
 | `core:data`（播放协调器刷新语义） | 17 | 0 |
+| `feature:settings`（**Compose 能力矩阵** + **账号摘要**） | 8 | 0 |
 | `feature:accounts`（**Compose 授权状态**） | 7 | 0 |
 | `feature:preview`（**Compose 预览分支**） | 7 | 0 |
-| `feature:settings`（**Compose 能力矩阵**） | 6 | 0 |
-| **合计** | **438** | **0** |
+| **合计** | **393** | **0** |
 
 > 说明：Android 模块的 `build` 会同时跑 `testDebugUnitTest` 与 `testReleaseUnitTest`，
 > 因此上表按 **debug 变体 + JVM 模块的 `test`** 去重统计，每个测试恰好计一次
-> （未去重时为 726）。
+> （未去重时约 642，含每个 Android 模块跑两遍）。上表数字取自各模块
+> `build/test-results/` 下 JUnit XML 的 `tests` 属性实测值；`provider:mock` 行已随该模块删除而移除。
+>
+> `feature:files` 的 43 = `FilesScreenTest` 12 + `FilesViewModelTest` 20 + `FolderListingPolicyTest` 11。
 
 ### 5.1 Compose UI 测试为何用 Robolectric 而不是模拟器
 
@@ -280,6 +282,10 @@ testOptions {
 另外 `createComposeRule()` 需要一个宿主 Activity，由 `ui-test-manifest` 提供。它必须声明在
 **unit test** 源集上（`testImplementation`）——只声明为 `debugImplementation` 时，
 release 变体的单元测试会因为找不到该 Activity 而全数失败。
+
+四个承载 Compose 测试的模块同时用 `@Config(sdk = [35])` 固定 Robolectric 的模拟 SDK 版本，
+与 `minSdk 35`（仅 Android 15+）保持一致；Robolectric 默认仍会自行下载对应版本的
+`android-all` 运行时。
 
 ### 6.1 新增 Provider 时的测试清单
 

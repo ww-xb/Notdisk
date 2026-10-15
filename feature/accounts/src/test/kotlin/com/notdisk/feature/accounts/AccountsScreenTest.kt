@@ -43,7 +43,7 @@ import kotlin.test.assertTrue
  * semantics tree on the JVM, which is enough for structural assertions of exactly this kind.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33])
+@Config(sdk = [35])
 class AccountsScreenTest {
 
     @get:Rule

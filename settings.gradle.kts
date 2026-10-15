@@ -57,7 +57,6 @@ include(":core:domain")
 include(":core:designsystem")
 
 // ---- Providers ----
-include(":provider:mock")
 include(":provider:p115")
 
 // ---- Features ----

@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -75,7 +77,7 @@ import kotlinx.coroutines.delay
  *
  *   1. declare a `provider:` project dependency (see `PlayerModuleIsolationTest`, which reads this
  *      module's `build.gradle.kts` and fails the build if one appears);
- *   2. import `provider:p115`, `provider:mock`, or any other vendor package;
+ *   2. import `provider:p115` or any other vendor package;
  *   3. branch on a provider identity — there is no `when (providerId)` in this module because no
  *      provider id is ever compared to anything here;
  *   4. construct a vendor URL, sign a request, or know a vendor's parameter names.
@@ -359,6 +361,11 @@ private fun PlayerTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // The player is a full-window destination with no app bar above it, so *it* owns the
+            // status-bar inset. Without this the title row and the back button sit under the clock
+            // and the camera cutout. Only the top is padded: the video fills the width edge-to-edge,
+            // and the system reserves the bottom gesture strip itself.
+            .statusBarsPadding()
             .padding(horizontal = Dimens.XSmall, vertical = Dimens.XSmall),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Dimens.XSmall),
@@ -471,6 +478,9 @@ private fun PlaybackDetails(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
+            // The player hides the host's bottom bar, so nothing else reserves the gesture strip;
+            // without this the last detail line sits under it.
+            .navigationBarsPadding()
             .padding(Dimens.Large),
         verticalArrangement = Arrangement.spacedBy(Dimens.Small),
     ) {

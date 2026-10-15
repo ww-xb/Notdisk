@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -29,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -43,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -110,6 +114,8 @@ fun AccountsRoute(
         onCancelAuthorization = viewModel::cancelAuthorization,
         onDismissBanner = viewModel::dismissBanner,
         onReload = viewModel::loadAccounts,
+        onCancelManualCredential = viewModel::cancelManualCredential,
+        onSubmitManualCredential = viewModel::submitManualCredential,
         modifier = modifier,
     )
 }
@@ -160,6 +166,8 @@ fun AccountsScreen(
     onReload: () -> Unit,
     modifier: Modifier = Modifier,
     quotas: Map<AccountId, StorageQuota> = emptyMap(),
+    onCancelManualCredential: () -> Unit = {},
+    onSubmitManualCredential: (String) -> Unit = {},
 ) {
     var removeTarget by remember { mutableStateOf<CloudAccount?>(null) }
 
@@ -255,6 +263,92 @@ fun AccountsScreen(
         },
         confirmLabel = "断开连接",
         destructive = true,
+    )
+
+    ManualCredentialDialog(
+        providerName = state.manualCredentialProviderName,
+        visible = state.manualCredentialProviderId != null,
+        isSubmitting = state.isSubmittingCredential,
+        onDismiss = onCancelManualCredential,
+        onConfirm = onSubmitManualCredential,
+    )
+}
+
+/**
+ * The cookie-paste dialog for [AuthFlowKind.MANUAL_CREDENTIAL].
+ *
+ * ### Why a multi-line field rather than the shared [TextInputDialog]
+ * A 115 cookie is a 300+ character string pasted from devtools. `TextInputDialog` is single-line
+ * and pre-selects its content, which is exactly right for renaming a file and exactly wrong here:
+ * a single-line field shows about forty characters of a value the user must be able to *eyeball*
+ * (a truncated paste is the most likely failure), and it would silently accept a mangled value.
+ * This dialog therefore shows a wrapping, multi-line field and states what the value must contain.
+ *
+ * ### Why the confirm button is not disabled on a length check
+ * There is no client-side rule for "a valid cookie": only the vendor can say. A length heuristic
+ * would reject a legitimately short session and accept a truncated long one. The button is disabled
+ * only while nothing has been typed, which prevents the one mistake that needs no network call to
+ * detect.
+ */
+@Composable
+private fun ManualCredentialDialog(
+    providerName: String?,
+    visible: Boolean,
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var value by remember(visible) { mutableStateOf("") }
+
+    if (!visible) return
+
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        title = { Text(text = "使用 Cookie 登录${providerName?.let { "：$it" } ?: ""}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Dimens.Small)) {
+                Text(
+                    text = "在浏览器中登录 115 后，打开开发者工具的「网络」面板，" +
+                        "复制任意请求的 Cookie 请求头，粘贴到下面。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "需要包含 UID、CID、SEID、KID 四项；可直接粘贴整行 Cookie 内容。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isSubmitting,
+                    // Multi-line on purpose: see this function's KDoc.
+                    singleLine = false,
+                    minLines = 4,
+                    maxLines = 8,
+                    label = { Text(text = "Cookie 内容") },
+                    placeholder = { Text(text = "UID=…; CID=…; SEID=…; KID=…") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                )
+                Text(
+                    text = "凭据会保存到本机的加密存储（Android Keystore），不会写入日志或普通数据库。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(value.trim()) },
+                enabled = !isSubmitting && value.isNotBlank(),
+            ) {
+                Text(text = if (isSubmitting) "验证中…" else "登录")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text(text = "取消") }
+        },
     )
 }
 

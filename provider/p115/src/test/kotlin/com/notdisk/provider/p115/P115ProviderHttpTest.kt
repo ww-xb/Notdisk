@@ -1015,12 +1015,23 @@ class P115ProviderHttpTest {
 
     // ------------------------------------------------------------------ auth flows
 
-    /** Only QR is advertised, so every other flow must fail closed without a request. */
+    /**
+     * Only the two advertised flows may be started; every other one must fail closed.
+     *
+     * `MANUAL_CREDENTIAL` is advertised but is *not* a free pass: starting it with no credential is a
+     * caller error, and the assertion is that it produces a typed `InvalidArgument` without touching
+     * the network. A provider that sent a request with no cookie would be guessing.
+     */
     @Test
     fun `unadvertised auth flows fail closed`() = runTest {
         val provider = providerWithAccount()
+        val advertised = setOf(
+            com.notdisk.core.model.AuthFlowKind.QR_CODE,
+            com.notdisk.core.model.AuthFlowKind.MANUAL_CREDENTIAL,
+        )
+
         for (flow in com.notdisk.core.model.AuthFlowKind.entries) {
-            if (flow == com.notdisk.core.model.AuthFlowKind.QR_CODE) continue
+            if (flow in advertised) continue
             val result = provider.auth.beginAuthorization(flow)
             assertTrue(
                 result is CloudResult.Failure,
@@ -1028,7 +1039,76 @@ class P115ProviderHttpTest {
             )
             assertTrue((result as CloudResult.Failure).error is CloudError.Unsupported)
         }
+
+        // An advertised flow with no input is refused locally rather than sent as an empty cookie.
+        val empty = provider.auth.beginAuthorization(
+            com.notdisk.core.model.AuthFlowKind.MANUAL_CREDENTIAL,
+            com.notdisk.core.provider.AuthFlowParams(manualCredential = "   "),
+        )
+        assertTrue(empty is CloudResult.Failure)
+        assertTrue((empty as CloudResult.Failure).error is CloudError.InvalidArgument)
+
         assertEquals(0, server.requestCount)
+    }
+
+    /**
+     * The manual-credential flow persists a session only after the vendor confirms it.
+     *
+     * Two properties are asserted, and both matter:
+     *  - a cookie whose `nav` check is rejected is **never written**, so a stale paste cannot leave an
+     *    account row that looks bound and fails on the user's first tap;
+     *  - a cookie the vendor accepts produces a `Completed` challenge (the contract's "credentials
+     *    were produced without further interaction"), not something the caller would try to poll.
+     */
+    @Test
+    fun `manual credential flow verifies before persisting`() = runTest {
+        val host = server.url("/").toString().trimEnd('/')
+        val credentials = com.notdisk.provider.p115.auth.InMemoryP115CredentialStore()
+        val accounts = com.notdisk.provider.p115.auth.InMemoryP115AccountMetadataStore()
+        val provider = P115CloudProvider(
+            logger = NoOpCloudLogger,
+            credentialStore = credentials,
+            accountMetadataStore = accounts,
+            hostOverrides = mapOf(
+                P115Hosts.WEB_API to host,
+                P115Hosts.PASSPORT_API to host,
+                P115Hosts.QRCODE_API to host,
+                P115Hosts.MY to host,
+                P115Hosts.APS to host,
+            ),
+            okHttpClient = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .readTimeout(2, TimeUnit.SECONDS)
+                .build(),
+        )
+
+        val cookie = "UID=20856775_A1_1700000000; CID=0123456789abcdef0123456789abcdef; " +
+            "SEID=0123456789abcdef; KID=fedcba9876543210fedcba9876543210"
+
+        // (1) The vendor rejects the session (a `state: false` nav payload).
+        enqueue("""{"state":false,"error":"授权失效"}""")
+        val rejected = provider.auth.beginAuthorization(
+            com.notdisk.core.model.AuthFlowKind.MANUAL_CREDENTIAL,
+            com.notdisk.core.provider.AuthFlowParams(manualCredential = cookie),
+        )
+        assertTrue(rejected is CloudResult.Failure, "a rejected cookie must not be persisted")
+        assertTrue(credentials.snapshot().isEmpty(), "nothing may be written before verification")
+        assertTrue(accounts.all().isEmpty(), "no account row may be created for a rejected cookie")
+
+        // (2) The vendor accepts it.
+        enqueue("""{"state":true,"data":{"user_id":20856775,"user_name":"wwxb","mark":1023}}""")
+        val accepted = provider.auth.beginAuthorization(
+            com.notdisk.core.model.AuthFlowKind.MANUAL_CREDENTIAL,
+            com.notdisk.core.provider.AuthFlowParams(manualCredential = cookie),
+        )
+        assertTrue(accepted is CloudResult.Success, "an accepted cookie must complete the flow")
+        val challenge = (accepted as CloudResult.Success).data
+        assertTrue(
+            challenge is com.notdisk.core.provider.AuthChallenge.Completed,
+            "a manual credential produces credentials synchronously; got $challenge",
+        )
+        assertEquals(1, credentials.snapshot().size, "the verified credential must be stored")
+        assertEquals("wwxb", accounts.all().single().displayName)
     }
 
     /**

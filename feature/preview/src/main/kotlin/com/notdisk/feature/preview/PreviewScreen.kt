@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -238,6 +240,9 @@ private fun PreviewTopBar(title: String, onBack: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // The previewer is a full-window destination with no app bar above it, so it owns the
+            // status-bar inset rather than inheriting one from a host `Scaffold`.
+            .statusBarsPadding()
             .padding(horizontal = Dimens.XSmall, vertical = Dimens.XSmall),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Dimens.XSmall),
@@ -779,6 +784,8 @@ private fun DownloadBar(onDownload: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // The previewer hides the host's bottom bar, so it reserves the gesture strip itself.
+            .navigationBarsPadding()
             .padding(Dimens.Large),
         horizontalArrangement = Arrangement.Center,
     ) {

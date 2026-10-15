@@ -36,10 +36,6 @@ dependencies {
     // re-exported through `core:data`'s DI graph, not through its API surface. The files screen
     // persists its view mode and sort choice there, so the type must be on the compile classpath.
     implementation(project(":core:database"))
-    // The in-memory provider from `provider:mock` backs the FilesViewModel unit tests: its
-    // file-system semantics (paging, latency, typed failures) are exactly what the stale-response
-    // and loadMore guards need to be exercised against. Test-only — never shipped.
-    testImplementation(project(":provider:mock"))
     // The settings store is backed by DataStore, and the tests construct a real one (over a temp
     // file) because `activeAccount` is the mechanism that decides which account the screen opens.
     testImplementation(libs.androidx.datastore.preferences)

@@ -100,9 +100,18 @@ jobs:
           {
             echo "## Notdisk v${{ steps.ver.outputs.version }}"
             echo
-            echo "下载 \`$name\`（debug 签名，Android 8.0+ / minSdk 26）。"
+            echo "下载 \`$name\`（debug 签名，**Android 15+ / minSdk 35**）。"
             echo
             echo "SHA-256：\`$sha\`"
+            echo
+            echo "本版本要点："
+            echo
+            echo "- 移除内置的模拟/演示网盘账号，所有内容只来自用户绑定的真实网盘"
+            echo "- 首页按账号数量分流：1 个账号直接显示该网盘内容，2 个及以上以网盘名作为顶层文件夹"
+            echo "- 115 支持直接粘贴 Cookie 登录（先校验、后写入加密存储）"
+            echo "- 账号管理从底部标签移到「设置 → 账号」"
+            echo "- 返回键改为返回上层文件夹，而不是退出应用"
+            echo "- 修复 18:9 及以上屏幕的顶部空白，全面沉浸式（edge-to-edge）"
             echo
             echo "由 CI 自动构建发布，来源 commit：\`${GITHUB_SHA}\`。"
             echo

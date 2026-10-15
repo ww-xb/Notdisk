@@ -10,10 +10,14 @@ import com.notdisk.core.data.repository.AccountRepository
 import com.notdisk.core.data.repository.CloudFileRepository
 import com.notdisk.core.model.AccountId
 import com.notdisk.core.model.CapabilitySupport
+import com.notdisk.core.model.CloudAccount
+import com.notdisk.core.model.CloudAccountKey
+import com.notdisk.core.model.FileCapabilities
 import com.notdisk.core.model.FileId
 import com.notdisk.core.model.FileItem
 import com.notdisk.core.model.FileSort
 import com.notdisk.core.model.FileSortField
+import com.notdisk.core.model.FileType
 import com.notdisk.core.model.ProviderId
 import com.notdisk.core.provider.ProviderRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -97,6 +101,87 @@ class FilesViewModel @Inject constructor(
         }
 
         viewModelScope.launch { adoptRememberedAccount() }
+
+        // The account list is what decides the home level, and it can change while this screen is
+        // alive (the settings screen's account manager binds or removes an account). Watching the
+        // local mirror is what lets a *removal* be reacted to; the mirror is cheap to observe
+        // because the repository writes provider answers into it.
+        viewModelScope.launch {
+            accountRepository.observeAccounts().collect { accounts ->
+                onAccountsChanged(accounts)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ home (multi-account)
+
+    /**
+     * Re-reads the bound accounts from every provider and re-decides the home level.
+     *
+     * ### Why this runs on every resume, and why it must not move the user
+     * Accounts are bound on the settings tab, so a user who binds their first cloud and returns here
+     * expects to see its files. The browser's ViewModel survives that round trip (the `files`
+     * destination is never popped), so nothing else would re-read the list.
+     *
+     * It re-enumerates the providers rather than trusting the local mirror, because a
+     * just-completed login exists only on the provider side until the next enumeration. For 115 that
+     * call is purely local (`listAccounts` never contacts the vendor), so resuming costs nothing.
+     *
+     * ### The position-preservation rule
+     * Re-rendering unconditionally would throw the user back to the cloud's *root* every time the
+     * screen resumed — including after answering a permission dialog. So the level is recomputed
+     * first, and the screen is only redrawn when the account set actually changed the decision:
+     *  - the cloud being browsed is gone, or
+     *  - the number of accounts crossed the 1 ↔ many boundary.
+     *
+     * A newly bound *second* account while the user is browsing the first is deliberately not a
+     * redraw: the user is mid-folder, and up-navigation now leads to the picker (see `canGoUp`), so
+     * the new cloud is reachable without losing their place.
+     */
+    fun refreshAccounts() {
+        val ticket = generation.begin()
+        viewModelScope.launch {
+            when (val result = accountRepository.listAccounts()) {
+                is CloudResult.Failure -> applyFailure(ticket, result.error)
+                is CloudResult.Success -> {
+                    val accounts = result.data.accounts
+                    applyKnownAccounts(accounts)
+                    if (!generation.isCurrent(ticket)) return@launch
+
+                    val current = _state.value
+                    val open = current.openAccountKey()
+                    val stillBound = open != null && accounts.any {
+                        it.providerId == open.providerId && it.accountId == open.accountId
+                    }
+                    val expected = expectedLevel(accounts, open.takeIf { stillBound })
+
+                    if (expected != current.level || (open != null && !stillBound)) {
+                        renderLevel(ticket, open.takeIf { stillBound }, forceNetwork = true)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The level the account set implies for the given open cloud.
+     *
+     * Extracted because two callers must agree on it — [refreshAccounts] decides whether to redraw,
+     * and [renderLevel] decides what to draw — and a mismatch between the two would produce either a
+     * stale screen or a redraw loop.
+     */
+    private fun expectedLevel(
+        accounts: List<CloudAccount>,
+        openAccount: CloudAccountKey?,
+    ): ScreenLevel = when {
+        accounts.isEmpty() -> ScreenLevel.EMPTY
+        accounts.size > 1 && openAccount == null -> ScreenLevel.HOME_MULTI
+        else -> ScreenLevel.ACCOUNT_ROOT_SINGLE
+    }
+
+    /** Descends home → the cloud the user picked; a no-op once that cloud is open. */
+    fun openAccount(account: CloudAccount) {
+        open(account.providerId, account.accountId)
     }
 
     // ------------------------------------------------------------------ navigation
@@ -124,6 +209,8 @@ class FilesViewModel @Inject constructor(
             it.copy(
                 providerId = providerId,
                 accountId = accountId,
+                // Cleared here; `loadChildren` then fills it with the cloud's own root, so the
+                // breadcrumb is always the *account's* path rather than the picker's.
                 breadcrumb = emptyList(),
                 items = emptyList(),
                 error = null,
@@ -162,12 +249,47 @@ class FilesViewModel @Inject constructor(
     }
 
     /**
-     * Descends into [folder].
+     * Returns to the home level: the cloud picker when several accounts are bound, and the single
+     * cloud's root when only one is.
      *
-     * A tap on a file is *not* handled here: files are opened by the route's `onOpenMedia` /
-     * `onOpenPreview` callbacks, so this method can assume it is being asked for a directory.
+     * The open account is deliberately *not* carried over. "Home" means the level above a cloud, so
+     * re-opening the cloud the user just left would make the up-navigation look like it did nothing.
      */
+    fun goHome() {
+        val ticket = generation.begin()
+        val known = _state.value.knownAccounts
+
+        _state.update {
+            it.copy(
+                // The breadcrumb stays empty at home: it is the *account's* path, and at the home
+                // level there is no folder above the cloud to name.
+                breadcrumb = emptyList(),
+                items = emptyList(),
+                isLoading = true,
+                isRefreshing = false,
+                isLoadingMore = false,
+                nextCursor = null,
+                error = null,
+                errorDetail = null,
+                level = if (known.size > 1) ScreenLevel.HOME_MULTI else ScreenLevel.EMPTY,
+                providerId = null,
+                accountId = null,
+            )
+        }
+
+        viewModelScope.launch { renderLevel(ticket, openAccount = null, forceNetwork = false) }
+    }
+
+    /** Descends into [folder]. */
     fun openFolder(folder: FileItem) {
+        // The home level's rows are not files: they are the bound clouds, and opening one enters
+        // that cloud rather than listing a folder inside it.
+        if (_state.value.level.isHome) {
+            _state.value.knownAccounts
+                .firstOrNull { it.accountId.value == folder.id.value }
+                ?.let { openAccount(it) }
+            return
+        }
         if (!folder.isFolder) return
         val chain = _state.value.breadcrumb + folder
         val ticket = generation.begin()
@@ -176,8 +298,14 @@ class FilesViewModel @Inject constructor(
 
     /** Moves one level up. A no-op at the root, where there is nowhere to go. */
     fun navigateUp() {
-        val chain = _state.value.breadcrumb
-        if (chain.size <= 1) return
+        val state = _state.value
+        if (state.level.isHome) return
+        val chain = state.breadcrumb
+        if (chain.size <= 1) {
+            // At the cloud's own root, "up" means the home level.
+            goHome()
+            return
+        }
         val ticket = generation.begin()
         viewModelScope.launch {
             loadChildren(ticket = ticket, chain = chain.dropLast(1), forceNetwork = false)
@@ -192,7 +320,9 @@ class FilesViewModel @Inject constructor(
      *   for, which is worse than doing nothing.
      */
     fun navigateToBreadcrumb(index: Int) {
-        val chain = _state.value.breadcrumb
+        val state = _state.value
+        if (state.level.isHome) return
+        val chain = state.breadcrumb
         if (index !in chain.indices || index == chain.lastIndex) return
         val ticket = generation.begin()
         viewModelScope.launch {
@@ -201,16 +331,33 @@ class FilesViewModel @Inject constructor(
     }
 
     /**
-     * Re-reads the current folder from the provider, ignoring the cache.
+     * Re-reads whatever is currently on screen from the provider, ignoring the cache.
      *
-     * Also the retry entry point of the error state, which is why it works when the breadcrumb is
-     * still empty (a failed root fetch): in that case the root is re-resolved first.
+     * Also the retry entry point of the error state, which is why it works at the home level
+     * (where the account list itself may have failed to load) and with an empty breadcrumb (a
+     * failed root fetch, in which case the root is re-resolved first).
      */
     fun refresh() {
         val snapshot = _state.value
+        val ticket = generation.begin()
+
+        if (snapshot.level.isHome) {
+            viewModelScope.launch {
+                when (val result = accountRepository.listAccounts()) {
+                    is CloudResult.Failure -> applyFailure(ticket, result.error)
+                    is CloudResult.Success -> {
+                        applyKnownAccounts(result.data.accounts)
+                        if (generation.isCurrent(ticket)) {
+                            renderLevel(ticket, snapshot.openAccountKey(), forceNetwork = true)
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         val providerId = snapshot.providerId ?: return
         val accountId = snapshot.accountId ?: return
-        val ticket = generation.begin()
 
         viewModelScope.launch {
             val chain = snapshot.breadcrumb
@@ -409,6 +556,188 @@ class FilesViewModel @Inject constructor(
 
     // ------------------------------------------------------------------ internals
 
+    /** Records the accounts the home level can offer, without deciding what is on screen. */
+    private fun applyKnownAccounts(accounts: List<CloudAccount>) {
+        _state.update { it.copy(knownAccounts = accounts.sortedBy { it.addedAt }) }
+    }
+
+    /**
+     * Reacts to the bound-account list changing underneath the screen.
+     *
+     * The only change that must be acted on is *removal of the account being browsed*: without this,
+     * the screen would keep showing a cloud's folders while every request for them fails with
+     * "account does not exist".
+     *
+     * ### Why an empty observation is ignored while accounts are known
+     * This table is a *cache* the repository fills from provider answers
+     * (`AccountRepository.listAccounts` → `persistQuietly`), so the flow's first emission after
+     * subscribing is the table's state *before* anything was written — normally empty. Reacting to
+     * it would blank a screen whose accounts were just read successfully from the provider, which is
+     * exactly the "no account is bound" screen appearing over a working account.
+     *
+     * The same reasoning means a *newly* bound account is not picked up here: this observes a cache,
+     * and the authority for "which accounts are bound" is the provider. Binding happens on the
+     * settings tab, so the browser re-reads on its next render anyway.
+     */
+    private suspend fun onAccountsChanged(mirror: List<CloudAccount>) {
+        val previous = _state.value.knownAccounts
+        if (mirror.isEmpty() && previous.isNotEmpty()) return
+        if (mirror == previous) return
+        applyKnownAccounts(mirror)
+
+        val current = _state.value
+        val open = current.openAccountKey() ?: return
+        val stillBound = mirror.any {
+            it.providerId == open.providerId && it.accountId == open.accountId
+        }
+        if (stillBound) return
+
+        // The cloud the user was inside is gone. Falling back to home is the honest answer; the
+        // alternative (staying put) shows folders that can no longer be listed.
+        val ticket = generation.begin()
+        renderLevel(ticket, openAccount = null, forceNetwork = false)
+    }
+
+    /**
+     * Renders the current level, re-deciding it from the account list when [forceNetwork] asks for
+     * fresh data.
+     *
+     * @param openAccount the cloud the user was last inside, or `null` at the home level with
+     *   nothing open. With exactly one bound account this is what makes the home screen show that
+     *   cloud's contents directly rather than a redundant single-row list.
+     */
+    private suspend fun renderLevel(
+        ticket: Long,
+        openAccount: CloudAccountKey?,
+        forceNetwork: Boolean,
+    ) {
+        val accounts = _state.value.knownAccounts
+        val level = expectedLevel(accounts, openAccount)
+
+        if (level == ScreenLevel.EMPTY) {
+            if (generation.isCurrent(ticket)) {
+                _state.update {
+                    it.copy(
+                        level = ScreenLevel.EMPTY,
+                        breadcrumb = emptyList(),
+                        items = emptyList(),
+                        isLoading = false,
+                        isRefreshing = false,
+                        nextCursor = null,
+                        error = null,
+                        errorDetail = null,
+                    )
+                }
+            }
+            return
+        }
+
+        if (level == ScreenLevel.HOME_MULTI) {
+            if (generation.isCurrent(ticket)) {
+                _state.update {
+                    it.copy(
+                        level = ScreenLevel.HOME_MULTI,
+                        // No single cloud is open at this level, so the account-scoped fields are
+                        // cleared rather than left pointing at whichever cloud was last entered —
+                        // a stale `providerId` here is exactly what would make a folder action
+                        // target the wrong drive.
+                        providerId = null,
+                        accountId = null,
+                        breadcrumb = emptyList(),
+                        // One folder per bound cloud, labelled with the cloud's own name.
+                        items = homeItemsFor(accounts),
+                        isLoading = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        nextCursor = null,
+                        error = null,
+                        errorDetail = null,
+                        // No single provider's actions apply to a list of providers; offering a
+                        // "new folder" here would have to invent which cloud it meant.
+                        capabilities = FileActionAvailability.Unavailable,
+                        providerDisplayName = null,
+                        accountDisplayName = null,
+                    )
+                }
+            }
+            return
+        }
+
+        // Single account, or an explicit cloud selection: the cloud's own root is the content.
+        val target = openAccount
+            ?: accounts.first().let { CloudAccountKey(it.providerId, it.accountId) }
+        val providerId = target.providerId
+        val accountId = target.accountId
+
+        _state.update {
+            it.copy(
+                providerId = providerId,
+                accountId = accountId,
+                level = ScreenLevel.ACCOUNT_ROOT_SINGLE,
+                capabilities = registry.actionAvailability(providerId),
+                providerDisplayName = registry.find(providerId)?.displayName,
+            )
+        }
+
+        val root = files.getRoot(accountId, providerId)
+        when (root) {
+            is CloudResult.Failure -> applyFailure(ticket, root.error)
+            is CloudResult.Success ->
+                if (generation.isCurrent(ticket)) {
+                    loadChildren(ticket, listOf(root.data), forceNetwork = forceNetwork)
+                }
+        }
+    }
+
+    /**
+     * The home level's rows: one synthetic folder per bound cloud.
+     *
+     * ### Two decisions worth naming
+     *  - The row's **id is the account id**, not a provider id. A single provider can be bound
+     *    twice with two different accounts, and both must appear as two separate top-level folders.
+     *  - The row's **name is the provider's display name** ("115 网盘"), which is what the user
+     *    recognises. Two rows of the same cloud are disambiguated by appending the account's own
+     *    display name, so "115 网盘" never appears twice with no way to tell them apart.
+     *
+     * The synthetic folder carries no vendor capability flags: a top-level row is not a real remote
+     * object, so offering rename/delete on it would be a lie the provider would then reject.
+     */
+    private fun homeItemsFor(accounts: List<CloudAccount>): List<FileItem> {
+        val duplicateProviders = accounts.groupingBy { it.providerId }.eachCount()
+        return accounts.map { account ->
+            val cloudName = registry.find(account.providerId)?.displayName
+                ?: account.providerId.value
+            val needsSuffix = (duplicateProviders[account.providerId] ?: 0) > 1
+            FileItem(
+                id = FileId(account.accountId.value),
+                providerId = account.providerId,
+                accountId = account.accountId,
+                name = if (needsSuffix) "$cloudName · ${account.displayName}" else cloudName,
+                type = FileType.FOLDER,
+                // Folders have no size and no timestamp; `null` is the model's "not reported",
+                // which is exactly true here and is what stops the row inventing "0 B".
+                size = null,
+                modifiedTime = null,
+                createdTime = null,
+                capabilities = FileCapabilities(
+                    canRename = false,
+                    canDelete = false,
+                    canMove = false,
+                    canCopy = false,
+                    // Tapping the row opens the cloud, so it is always selectable.
+                    isBlocked = false,
+                ),
+            )
+        }
+    }
+
+    /** The cloud the user is currently inside, if any. */
+    private fun FilesUiState.openAccountKey(): CloudAccountKey? {
+        val provider = providerId ?: return null
+        val account = accountId ?: return null
+        return CloudAccountKey(provider, account)
+    }
+
     /**
      * Replaces the breadcrumb and loads that folder's children.
      *
@@ -431,10 +760,11 @@ class FilesViewModel @Inject constructor(
         // "Arriving somewhere new" is decided by the *path*, not by whether rows happen to be on
         // screen: a folder the user has just navigated into must never display the previous
         // folder's rows while its own listing is in flight, even for a frame.
-        val isArrival = snapshot.breadcrumb != chain
+        val isArrival = snapshot.breadcrumb != chain || snapshot.level.isHome
 
         _state.update {
             it.copy(
+                level = ScreenLevel.ACCOUNT_ROOT_SINGLE,
                 breadcrumb = chain,
                 // Clearing on arrival is what makes the loading branch reachable: the screen shows a
                 // spinner rather than another folder's contents under this folder's name.
@@ -517,30 +847,56 @@ class FilesViewModel @Inject constructor(
     }
 
     /**
-     * Opens whichever account the user last used, so the files tab is useful on a cold start
-     * instead of showing an empty "choose an account" screen.
+     * Decides the screen's first content, so the files tab is useful on a cold start instead of
+     * showing an empty "choose an account" screen.
      *
-     * The stored preference is treated as a *hint*, not as truth: an account that no longer exists
-     * (removed on another screen, or its provider dropped from this build) must not produce a
-     * permanent error, so the first live account is used instead.
+     * ### The rule this implements
+     *  - **no account** → the home level's empty state, which explains how to bind one;
+     *  - **exactly one account** → that cloud's contents *directly*, with no redundant one-row list
+     *    standing between the user and their files;
+     *  - **two or more accounts** → one top-level folder per cloud, named after the netdisk.
+     *
+     * The stored `activeAccount` preference is treated as a *hint* for which cloud to open when
+     * several are bound, not as truth: an account that no longer exists (removed on another screen,
+     * or its provider dropped from this build) must not produce a permanent error, so the hint is
+     * only honoured when it still names a live account.
      */
     private suspend fun adoptRememberedAccount() {
         if (_state.value.providerId != null) return
 
-        val stored = settings.activeAccount.first()
-        if (stored != null) {
-            val providerId = stored.first.takeIf { it.isNotBlank() }?.let(::ProviderId)
-            val accountId = stored.second.takeIf { it.isNotBlank() }?.let(::AccountId)
-            if (providerId != null && accountId != null &&
-                accountRepository.findAccount(providerId, accountId) is CloudResult.Success
-            ) {
-                open(providerId, accountId)
+        val ticket = generation.begin()
+        val accountsResult = accountRepository.listAccounts()
+        val accounts = when (accountsResult) {
+            is CloudResult.Success -> accountsResult.data.accounts
+            is CloudResult.Failure -> {
+                // A failed enumeration still leaves the local mirror to render, so the user sees
+                // their accounts (with an explanation) rather than a bare error page.
+                applyKnownAccounts(accountRepository.observeAccounts().first())
+                applyFailure(ticket, accountsResult.error)
                 return
             }
         }
 
-        val accounts = accountRepository.listAccounts().getOrNull()?.accounts.orEmpty()
-        accounts.firstOrNull()?.let { open(it.providerId, it.accountId) }
+        if (!generation.isCurrent(ticket)) return
+        applyKnownAccounts(accounts)
+
+        // The hint only picks *which* cloud to open; it never changes whether the home level is
+        // shown, because that is decided by how many accounts exist.
+        val hinted = settings.activeAccount.first()?.let { (provider, account) ->
+            accounts.firstOrNull {
+                it.providerId.value == provider && it.accountId.value == account
+            }
+        }
+
+        renderLevel(
+            ticket = ticket,
+            // With one account either branch opens the same cloud, so the hint is only consulted
+            // when there is a real choice to make.
+            openAccount = if (accounts.size > 1) null else hinted?.let {
+                CloudAccountKey(it.providerId, it.accountId)
+            },
+            forceNetwork = false,
+        )
     }
 }
 
@@ -641,6 +997,34 @@ internal fun combine(vararg values: CapabilitySupport): CapabilitySupport = when
 }
 
 /**
+ * Which level of the browser is on screen.
+ *
+ * ### Why this is explicit rather than derived from `breadcrumb.isEmpty()`
+ * "The breadcrumb is empty" conflates three genuinely different screens: no account is bound at
+ * all, several clouds are offered as top-level folders, and a single cloud is open at its own root.
+ * Only one of those may offer "new folder"; only one may be entered by a system back press; and
+ * each needs different copy. Deriving the level from the breadcrumb would make each of those a
+ * coincidence rather than a rule.
+ */
+enum class ScreenLevel {
+    /** No account is bound: the screen explains how to bind one. */
+    EMPTY,
+
+    /** Two or more accounts: the rows are the clouds themselves. */
+    HOME_MULTI,
+
+    /**
+     * A cloud's own root, reached either because it is the only bound account (the single-account
+     * rule) or because the user picked it from [HOME_MULTI].
+     */
+    ACCOUNT_ROOT_SINGLE,
+    ;
+
+    /** True when the rows on screen are clouds rather than remote folders. */
+    val isHome: Boolean get() = this != ACCOUNT_ROOT_SINGLE
+}
+
+/**
  * Everything the file browser renders.
  *
  * `providerId` / `accountId` being nullable is meaningful: the screen is *unbound* before an
@@ -649,6 +1033,15 @@ internal fun combine(vararg values: CapabilitySupport): CapabilitySupport = when
 data class FilesUiState(
     val providerId: ProviderId? = null,
     val accountId: AccountId? = null,
+    /** Which level is on screen; see [ScreenLevel]. */
+    val level: ScreenLevel = ScreenLevel.EMPTY,
+    /**
+     * Every bound account, across every provider.
+     *
+     * Held in state rather than read on demand because the home level renders one row per entry and
+     * the back-press rule depends on how many there are. Kept up to date by the repository's flow.
+     */
+    val knownAccounts: List<CloudAccount> = emptyList(),
     /** Root → current folder. The last entry is the folder on screen. */
     val breadcrumb: List<FileItem> = emptyList(),
     val items: List<FileItem> = emptyList(),
@@ -674,8 +1067,30 @@ data class FilesUiState(
 ) {
     val currentFolder: FileItem? get() = breadcrumb.lastOrNull()
 
-    /** False at the root: there is nothing to go up to. */
-    val canGoUp: Boolean get() = breadcrumb.size > 1
+    /**
+     * True when the screen is showing remote folder contents.
+     *
+     * The home levels list clouds, not folders, so every folder-specific affordance (up-navigation,
+     * breadcrumb, new folder, paging) keys off this rather than off "the breadcrumb is empty".
+     */
+    val isListingFolder: Boolean get() = level == ScreenLevel.ACCOUNT_ROOT_SINGLE
+
+    /**
+     * Whether "go up" leads anywhere.
+     *
+     * Three distinct cases, and only two of them are navigable:
+     *  - an empty home has nothing to go up to;
+     *  - the cloud *picker* is the top level, so there is nothing above it either;
+     *  - a cloud's root goes up to the picker **only when a picker exists** — with a single bound
+     *    account, up would re-render the identical root, so the control is hidden rather than
+     *    offered as a no-op.
+     */
+    val canGoUp: Boolean
+        get() = when (level) {
+            ScreenLevel.EMPTY, ScreenLevel.HOME_MULTI -> false
+            ScreenLevel.ACCOUNT_ROOT_SINGLE ->
+                breadcrumb.size > 1 || knownAccounts.size > 1
+        }
 
     /**
      * Whether the provider has more rows and no request is already running.
@@ -683,13 +1098,21 @@ data class FilesUiState(
      * A `null` cursor is the provider's definitive "this is everything", so it is what stops an
      * infinite scroll from looping over page 1 forever.
      */
-    val canLoadMore: Boolean get() = nextCursor != null && !isLoadingMore && !isRefreshing && !isLoading
+    val canLoadMore: Boolean
+        get() = isListingFolder && nextCursor != null && !isLoadingMore && !isRefreshing && !isLoading
 
     /** An account is open but its folder has produced no rows and no failure. */
-    val isEmpty: Boolean get() = items.isEmpty() && !isLoading && error == null
+    val isEmpty: Boolean
+        get() = isListingFolder && items.isEmpty() && !isLoading && error == null
 
     /** Nothing has been opened at all — distinct from an empty folder, and rendered differently. */
     val isUnbound: Boolean get() = providerId == null || accountId == null
+
+    /** The home level with more than one cloud, which is the only level whose rows are clouds. */
+    val isAccountPicker: Boolean get() = level == ScreenLevel.HOME_MULTI
+
+    /** No account is bound at all. */
+    val isNoAccounts: Boolean get() = level == ScreenLevel.EMPTY
 }
 
 /**

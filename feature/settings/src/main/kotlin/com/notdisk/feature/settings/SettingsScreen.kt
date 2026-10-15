@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -157,6 +158,11 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                // The nav host hands this destination a zero inset (see `NotDiskNavHost`), because
+                // the *file browser* owns its own `TopAppBar` padding. This screen has no app bar, so
+                // without this the first section header sits underneath the status bar. It is the
+                // same class of defect as the reported "顶部有点空", mirrored.
+                .statusBarsPadding()
                 .verticalScroll(rememberScrollState()),
         ) {
             AppearanceSection(

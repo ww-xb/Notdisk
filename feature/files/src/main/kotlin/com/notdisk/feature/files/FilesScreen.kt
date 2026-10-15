@@ -1,6 +1,14 @@
 package com.notdisk.feature.files
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,6 +66,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,8 +84,9 @@ import com.notdisk.core.designsystem.component.ConfirmDialog
 import com.notdisk.core.designsystem.component.EmptyState
 import com.notdisk.core.designsystem.component.ErrorState
 import com.notdisk.core.designsystem.component.FilePathBreadcrumb
+import com.notdisk.core.designsystem.component.FileGridSkeleton
+import com.notdisk.core.designsystem.component.FileListSkeleton
 import com.notdisk.core.designsystem.component.LoadingIndicatorRow
-import com.notdisk.core.designsystem.component.LoadingState
 import com.notdisk.core.designsystem.component.TextInputDialog
 import com.notdisk.core.designsystem.format.CloudDateTimeFormatter
 import com.notdisk.core.designsystem.format.FileSizeFormatter
@@ -113,11 +123,15 @@ import com.notdisk.core.model.ProviderId
  *   breadcrumb, and back would appear to do nothing.
  * @param onOpenMedia invoked when the user asks to play a file the provider can stream.
  * @param onOpenPreview invoked when the user asks to preview a file the provider can render inline.
+ * @param onOpenAccounts invoked by the empty state's "去绑定账号". It is **required** (no default):
+ *   this screen's whole first-run experience depends on that button leading somewhere, and a
+ *   defaulted no-op is exactly how it silently stopped working — see [FilesScreen]'s note.
  */
 @Composable
 fun FilesRoute(
     onOpenMedia: (providerId: String, accountId: String, fileId: String) -> Unit,
     onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onOpenAccounts: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
@@ -174,7 +188,9 @@ fun FilesRoute(
         onDismissError = viewModel::dismissError,
         onOpenMedia = onOpenMedia,
         onOpenPreview = onOpenPreview,
-        onGoHome = viewModel::goHome,
+        // Passed straight through. It is deliberately *not* `viewModel::goHome`: that only resets
+        // this screen's own level, which is why the button appeared to do nothing.
+        onOpenAccounts = onOpenAccounts,
         modifier = modifier,
     )
 }
@@ -202,8 +218,17 @@ fun FilesRoute(
  * [FilesUiState.capabilities]), and the *item* must permit it (`FileCapabilities.canDelete == true`
  * — `null` means "the provider did not say", which is not permission).
  *
+ * ### Why "去绑定账号" is wired to an injected callback, never to a ViewModel method
+ * This screen is the app's only route to the login screen for a first-run user (the bottom bar has
+ * no accounts tab). It used to call `onGoHome`, which defaulted to `{}` and — once the account
+ * manager moved to `设置 → 账号` — only reset the *browser's* own level, so the button did visibly
+ * nothing. The action now comes in as a required parameter, so a host that forgets to wire it fails
+ * to compile instead of shipping a dead end.
+ *
  * @param state the complete screen state. This composable owns no state beyond which dialog, menu
  *   or pending confirmation is open.
+ * @param onOpenAccounts opens the account manager. Required for the same reason it is documented
+ *   above: a default here would let the dead end come back silently.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -222,9 +247,9 @@ fun FilesScreen(
     onDismissError: () -> Unit,
     onOpenMedia: (providerId: String, accountId: String, fileId: String) -> Unit,
     onOpenPreview: (providerId: String, accountId: String, fileId: String) -> Unit,
+    onOpenAccounts: () -> Unit,
     modifier: Modifier = Modifier,
     onSearchRequested: (() -> Unit)? = null,
-    onGoHome: () -> Unit = {},
 ) {
     var showCreateFolderDialog by rememberSaveable { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<FileItem?>(null) }
@@ -334,15 +359,23 @@ fun FilesScreen(
                 .padding(padding),
         ) {
             if (state.isListingFolder && state.breadcrumb.isNotEmpty()) {
-                FilePathBreadcrumb(
-                    // `id to label`: the id is what navigation uses, the label is what the user
-                    // reads. The root's own name is the cloud's name, not an empty string.
-                    path = state.breadcrumb.map { it.id.value to it.name },
-                    onCrumbClick = { crumbId ->
-                        val index = state.breadcrumb.indexOfFirst { it.id.value == crumbId }
-                        if (index >= 0) onNavigateToBreadcrumb(index)
-                    },
-                )
+                // Cross-faded on the *path* rather than on the state: the breadcrumb is rebuilt for
+                // every emitted state, but it only looks different when the user actually moved.
+                Crossfade(
+                    targetState = state.breadcrumb.map { it.id.value },
+                    animationSpec = tween(durationMillis = BREADCRUMB_FADE_MILLIS),
+                    label = "breadcrumb",
+                ) {
+                    FilePathBreadcrumb(
+                        // `id to label`: the id is what navigation uses, the label is what the user
+                        // reads. The root's own name is the cloud's name, not an empty string.
+                        path = state.breadcrumb.map { it.id.value to it.name },
+                        onCrumbClick = { crumbId ->
+                            val index = state.breadcrumb.indexOfFirst { it.id.value == crumbId }
+                            if (index >= 0) onNavigateToBreadcrumb(index)
+                        },
+                    )
+                }
                 HorizontalDivider(
                     thickness = Dimens.Divider,
                     color = MaterialTheme.colorScheme.outlineVariant,
@@ -350,112 +383,45 @@ fun FilesScreen(
             }
 
             // A refresh replaces neither the rows nor the breadcrumb, so without this the gesture
-            // would look like it did nothing at all until the list quietly changed. A determinate
-            // bar that is always composed (and simply transparent when idle) keeps the layout from
-            // jumping by 4dp every time a refresh starts. It is not shown at the home level, where
-            // there is no listing to refresh.
+            // would look like it did nothing at all until the list quietly changed. The bar owns a
+            // fixed 6dp of layout whether or not it is running, and only its *alpha* animates — so a
+            // refresh fades in instead of appearing as a hard 6dp jump, and the list below never
+            // moves. It is not shown at the home level, where there is no listing to refresh.
             if (state.isListingFolder) {
+                val refreshing = state.isRefreshing
+                val progressAlpha by animateFloatAsState(
+                    targetValue = if (refreshing) 1f else 0f,
+                    animationSpec = tween(durationMillis = PROGRESS_FADE_MILLIS),
+                    label = "refresh-progress-alpha",
+                )
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(Dimens.ProgressTrack),
-                    color = if (state.isRefreshing) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        Color.Transparent
-                    },
+                        .height(Dimens.ProgressTrack)
+                        .alpha(progressAlpha),
+                    color = MaterialTheme.colorScheme.primary,
                     trackColor = Color.Transparent,
                 )
             }
 
-            when {
-                state.isLoading && state.items.isEmpty() ->
-                    LoadingState(
-                        label = state.currentFolder?.name?.let { "正在读取「$it」…" } ?: "正在读取…",
-                        modifier = Modifier.fillMaxSize(),
-                    )
-
-                state.error != null && state.items.isEmpty() ->
-                    ErrorState(
-                        userMessage = state.error,
-                        detail = state.errorDetail,
-                        onRetry = {
-                            onDismissError()
-                            onRefresh()
-                        },
-                        retryLabel = "重新加载",
-                        modifier = Modifier.fillMaxSize(),
-                    )
-
-                state.isNoAccounts ->
-                    // **The** first-run screen: no account is bound. It must say how to bind one
-                    // *and* offer the route, because the bottom bar deliberately has no accounts tab
-                    // and a user who cannot find the login screen has no way forward.
-                    EmptyState(
-                        title = "还没有绑定网盘账号",
-                        icon = Icons.Filled.FolderOff,
-                        description = "到「设置 → 账号」中登录 115 网盘。只有一个账号时，这里会直接显示该网盘的内容；" +
-                            "绑定多个账号后，会先按网盘名分组显示。",
-                        actionLabel = "去绑定账号",
-                        onAction = onGoHome,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-
-                state.isAccountPicker ->
-                    // Two or more clouds: the rows *are* the clouds, so an empty list here can only
-                    // mean the account list is mid-update.
-                    if (state.items.isEmpty()) {
-                        EmptyState(
-                            title = "正在准备账号列表",
-                            icon = Icons.Filled.FolderOff,
-                            description = "已连接的账号会以网盘名作为顶层文件夹显示。",
-                            actionLabel = "刷新",
-                            onAction = onRefresh,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        FileContent(
-                            state = state,
-                            onLoadMore = onLoadMore,
-                            callbacks = callbacks,
-                        )
-                    }
-
-                state.items.isEmpty() ->
-                    EmptyState(
-                        title = "这个文件夹是空的",
-                        icon = Icons.Filled.FolderOff,
-                        description = buildString {
-                            append("「")
-                            append(state.currentFolder?.name ?: "当前文件夹")
-                            append("」中还没有任何内容。")
-                            if (state.capabilities.canCreateFolder) {
-                                append("你可以新建一个文件夹开始整理。")
-                            } else {
-                                append("请在对应的网盘 App 中上传文件后刷新。")
-                            }
-                        },
-                        actionLabel = if (state.capabilities.canCreateFolder) "新建文件夹" else null,
-                        onAction = if (state.capabilities.canCreateFolder) {
-                            { showCreateFolderDialog = true }
-                        } else {
-                            null
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-
-                else -> FileContent(
-                    state = state,
-                    onLoadMore = onLoadMore,
-                    callbacks = callbacks,
-                )
-            }
-
             // A failure while rows are already visible must not erase them: the user keeps their
-            // context and gets a dismissible explanation instead of losing their place.
-            if (state.error != null && state.items.isNotEmpty()) {
+            // context and gets a dismissible explanation instead of losing their place. It slides in
+            // rather than jumping the list, so a mid-scroll failure does not shove the rows the user
+            // was reading under their finger.
+            //
+            // It sits *above* the content because that content is `fillMaxSize`: composing the strip
+            // after it would place it below the visible area, where it explained a failure nobody
+            // could see. The expand/shrink animation keeps that honest — the row list is pushed down
+            // by exactly the strip's height, and returns when it is dismissed.
+            AnimatedVisibility(
+                visible = state.error != null && state.items.isNotEmpty(),
+                enter = expandVertically(animationSpec = tween(TRANSITION_MILLIS)) +
+                    fadeIn(animationSpec = tween(TRANSITION_MILLIS)),
+                exit = shrinkVertically(animationSpec = tween(TRANSITION_MILLIS)) +
+                    fadeOut(animationSpec = tween(TRANSITION_MILLIS)),
+            ) {
                 InlineFailure(
-                    message = state.error,
+                    message = state.error.orEmpty(),
                     detail = state.errorDetail,
                     onDismiss = onDismissError,
                     onRetry = {
@@ -463,6 +429,101 @@ fun FilesScreen(
                         onRefresh()
                     },
                 )
+            }
+
+            // ### Why the content is cross-faded between its shapes
+            // Every one of these branches used to snap into place: tapping a folder blanked the
+            // list for the whole provider round trip and then painted the new rows in a single
+            // frame. That is the "生硬" the user reported. Crossfading keyed on the *shape* of the
+            // content (not on the state object, which changes on every emitted byte) fades one
+            // presentation out while the next fades in, and — because a skeleton is the loading
+            // shape rather than an empty box — something is on screen for the entire wait.
+            Crossfade(
+                targetState = state.contentMode(),
+                animationSpec = tween(durationMillis = CONTENT_FADE_MILLIS),
+                label = "files-content",
+            ) { mode ->
+                when (mode) {
+                    ContentMode.LOADING -> FolderSkeleton(
+                        state = state,
+                        label = state.currentFolder?.name?.let { "正在读取「$it」…" } ?: "正在读取…",
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    ContentMode.ERROR ->
+                        ErrorState(
+                            userMessage = state.error.orEmpty(),
+                            detail = state.errorDetail,
+                            onRetry = {
+                                onDismissError()
+                                onRefresh()
+                            },
+                            retryLabel = "重新加载",
+                            modifier = Modifier.fillMaxSize(),
+                        )
+
+                    ContentMode.NO_ACCOUNTS ->
+                        // **The** first-run screen: no account is bound. It must say how to bind one
+                        // *and* offer the route, because the bottom bar deliberately has no accounts
+                        // tab and a user who cannot find the login screen has no way forward.
+                        EmptyState(
+                            title = "还没有绑定网盘账号",
+                            icon = Icons.Filled.FolderOff,
+                            description = "到「设置 → 账号」中登录 115 网盘。只有一个账号时，这里会直接显示该网盘的内容；" +
+                                "绑定多个账号后，会先按网盘名分组显示。",
+                            actionLabel = "去绑定账号",
+                            onAction = onOpenAccounts,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+
+                    ContentMode.ACCOUNT_PICKER ->
+                        // Two or more clouds: the rows *are* the clouds, so an empty list here can
+                        // only mean the account list is mid-update.
+                        if (state.items.isEmpty()) {
+                            // Mid-update is a *loading* state, not an empty one: showing "正在准备
+                            // 账号列表" with a 刷新 button presented a wait as a dead end.
+                            FolderSkeleton(
+                                state = state,
+                                label = "正在准备账号列表…",
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            FileContent(
+                                state = state,
+                                onLoadMore = onLoadMore,
+                                callbacks = callbacks,
+                            )
+                        }
+
+                    ContentMode.EMPTY_FOLDER ->
+                        EmptyState(
+                            title = "这个文件夹是空的",
+                            icon = Icons.Filled.FolderOff,
+                            description = buildString {
+                                append("「")
+                                append(state.currentFolder?.name ?: "当前文件夹")
+                                append("」中还没有任何内容。")
+                                if (state.capabilities.canCreateFolder) {
+                                    append("你可以新建一个文件夹开始整理。")
+                                } else {
+                                    append("请在对应的网盘 App 中上传文件后刷新。")
+                                }
+                            },
+                            actionLabel = if (state.capabilities.canCreateFolder) "新建文件夹" else null,
+                            onAction = if (state.capabilities.canCreateFolder) {
+                                { showCreateFolderDialog = true }
+                            } else {
+                                null
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+
+                    ContentMode.CONTENT -> FileContent(
+                        state = state,
+                        onLoadMore = onLoadMore,
+                        callbacks = callbacks,
+                    )
+                }
             }
         }
     }
@@ -552,30 +613,41 @@ private fun FileContent(
         return
     }
 
-    when (state.viewMode) {
-        NotDiskSettingsStore.ViewMode.LIST -> LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            // Room for the FAB, so the last row is not permanently covered by it.
-            contentPadding = PaddingValues(bottom = Dimens.Huge),
-        ) {
-            items(items = state.items, key = { it.id.value }) { item ->
-                FileRow(item = item, callbacks = callbacks)
+    // ### Why the list/grid swap is cross-faded too
+    // Switching presentation used to hard-cut: the same files, re-laid out in a single frame, with
+    // no signal that the two views hold the same content. A short cross-fade makes it read as one
+    // list changing shape rather than as a navigation to a different screen — and the AppBar's
+    // toggle button, which is what the user just pressed, stays put above it.
+    Crossfade(
+        targetState = state.viewMode,
+        animationSpec = tween(durationMillis = VIEW_MODE_FADE_MILLIS),
+        label = "view-mode",
+    ) { mode ->
+        when (mode) {
+            NotDiskSettingsStore.ViewMode.LIST -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                // Room for the FAB, so the last row is not permanently covered by it.
+                contentPadding = PaddingValues(bottom = Dimens.Huge),
+            ) {
+                items(items = state.items, key = { it.id.value }) { item ->
+                    FileRow(item = item, callbacks = callbacks)
+                }
+                pagingFooter(state = state, onLoadMore = onLoadMore)
             }
-            pagingFooter(state = state, onLoadMore = onLoadMore)
-        }
 
-        NotDiskSettingsStore.ViewMode.GRID -> LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = GRID_CELL_MIN_WIDTH),
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(Dimens.Medium),
-            horizontalArrangement = Arrangement.spacedBy(Dimens.Medium),
-            verticalArrangement = Arrangement.spacedBy(Dimens.Medium),
-        ) {
-            items(items = state.items, key = { it.id.value }) { item ->
-                FileCell(item = item, callbacks = callbacks)
-            }
-            item(key = PAGING_FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) {
-                PagingFooter(state = state, onLoadMore = onLoadMore)
+            NotDiskSettingsStore.ViewMode.GRID -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = GRID_CELL_MIN_WIDTH),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(Dimens.Medium),
+                horizontalArrangement = Arrangement.spacedBy(Dimens.Medium),
+                verticalArrangement = Arrangement.spacedBy(Dimens.Medium),
+            ) {
+                items(items = state.items, key = { it.id.value }) { item ->
+                    FileCell(item = item, callbacks = callbacks)
+                }
+                item(key = PAGING_FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) {
+                    PagingFooter(state = state, onLoadMore = onLoadMore)
+                }
             }
         }
     }
@@ -609,6 +681,72 @@ private fun FilesUiState.titleFor(): String = when {
     isAccountPicker -> "全部网盘"
     isNoAccounts -> "文件"
     else -> currentFolder?.name ?: "文件"
+}
+
+/**
+ * The mutually exclusive shapes the content area can take.
+ *
+ * ### Why this is a value rather than the `when` that used to be inline
+ * The transition animation must key on *which screen is showing*, not on the state object: a state
+ * is re-emitted for a cursor, a cache origin or an error detail, and cross-fading on every one of
+ * those would make the list flicker while nothing visible changed. Deriving a small enum makes the
+ * animation trigger exactly the real transitions — list ⇄ skeleton, list ⇄ error, list ⇄ empty.
+ *
+ * The order of the branches is the priority order, and it is the same one the composable rendered
+ * before this enum existed: while a first load is in flight the spinner (now the skeleton) wins over
+ * a stale error, an error wins over "no accounts", and so on.
+ */
+private enum class ContentMode {
+    /** First load of a folder, or a home level whose accounts are still being read. */
+    LOADING,
+
+    /** Nothing is on screen and the last attempt failed. */
+    ERROR,
+
+    /** No cloud is bound at all. */
+    NO_ACCOUNTS,
+
+    /** Two or more clouds, but their rows are not ready yet. */
+    ACCOUNT_PICKER,
+
+    /** A successful listing with no rows. */
+    EMPTY_FOLDER,
+
+    /** Rows are on screen. */
+    CONTENT,
+}
+
+private fun FilesUiState.contentMode(): ContentMode = when {
+    isLoading && items.isEmpty() -> ContentMode.LOADING
+    error != null && items.isEmpty() -> ContentMode.ERROR
+    isNoAccounts -> ContentMode.NO_ACCOUNTS
+    isAccountPicker -> ContentMode.ACCOUNT_PICKER
+    items.isEmpty() -> ContentMode.EMPTY_FOLDER
+    else -> ContentMode.CONTENT
+}
+
+/**
+ * The placeholder list shown while the first load of a folder is in flight.
+ *
+ * ### Why this is not just `FileListSkeleton`
+ * The skeleton has to mirror the *presentation the user chose*: showing list-shaped rows to someone
+ * who prefers the grid would make the content jump twice — once when the layout switches, and again
+ * when the rows arrive. It also has to mirror the level: the account picker's rows are clouds (a
+ * plain list), so honouring the stored grid preference there would promise a layout the picker
+ * deliberately never uses.
+ */
+@Composable
+private fun FolderSkeleton(
+    state: FilesUiState,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    val useGrid = state.isListingFolder && state.viewMode == NotDiskSettingsStore.ViewMode.GRID
+    if (useGrid) {
+        FileGridSkeleton(modifier = modifier, label = label)
+    } else {
+        FileListSkeleton(modifier = modifier, label = label)
+    }
 }
 
 /**
@@ -817,6 +955,9 @@ private fun InlineFailure(
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
 ) {
+    // The strip is a `Column` of intrinsic height, not a `Box` with a fixed size: the optional
+    // `detail` line is what makes it taller on a technical failure, and the enter/exit animation at
+    // the call site measures whatever height this produces.
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -962,6 +1103,33 @@ private object FileTimestamp {
 /** One key for the single synthetic footer, so Compose can reuse it across recompositions. */
 private const val PAGING_FOOTER_KEY = "paging-footer"
 
+/**
+ * How long the file list and the file grid take to cross-fade into each other.
+ *
+ * Fast enough to feel like the list *settled* rather than like a screen transition the user has to
+ * wait out; slow enough that the swap is not a hard cut. It is deliberately shorter than Material's
+ * default medium duration for the same reason.
+ */
+private const val CONTENT_FADE_MILLIS = 220
+
+/** Duration of the inline failure strip's expand/shrink, matched to [CONTENT_FADE_MILLIS]. */
+private const val TRANSITION_MILLIS = 220
+
+/** Fade of the refresh progress bar. Long enough to read as a fade, short enough to not lag input. */
+private const val PROGRESS_FADE_MILLIS = 180
+
+/** Fade of the breadcrumb when the user actually moves. A hard cut here reads as a jolt. */
+private const val BREADCRUMB_FADE_MILLIS = 180
+
+/**
+ * Fade between the list and the grid presentation.
+ *
+ * Slightly longer than the other fades because two entirely different layouts are swapping places:
+ * at 180ms the eye reads the grid's cells as the list's rows "jumping", which is the opposite of the
+ * intent.
+ */
+private const val VIEW_MODE_FADE_MILLIS = 260
+
 /** Grid cells are at least this wide; `Adaptive` then fits 2–4 columns on a phone. */
 private val GRID_CELL_MIN_WIDTH = 108.dp
 
@@ -1099,6 +1267,7 @@ private fun FilesScreenListPreview() {
             onDismissError = {},
             onOpenMedia = { _, _, _ -> },
             onOpenPreview = { _, _, _ -> },
+            onOpenAccounts = {},
         )
     }
 }
@@ -1123,6 +1292,7 @@ private fun FilesScreenGridPreview() {
             onDismissError = {},
             onOpenMedia = { _, _, _ -> },
             onOpenPreview = { _, _, _ -> },
+            onOpenAccounts = {},
         )
     }
 }
@@ -1147,6 +1317,7 @@ private fun FilesScreenEmptyPreview() {
             onDismissError = {},
             onOpenMedia = { _, _, _ -> },
             onOpenPreview = { _, _, _ -> },
+            onOpenAccounts = {},
         )
     }
 }
@@ -1171,6 +1342,7 @@ private fun FilesScreenErrorPreview() {
             onDismissError = {},
             onOpenMedia = { _, _, _ -> },
             onOpenPreview = { _, _, _ -> },
+            onOpenAccounts = {},
         )
     }
 }

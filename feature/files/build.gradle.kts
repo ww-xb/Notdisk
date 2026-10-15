@@ -20,6 +20,12 @@ android {
                 )
                 it.systemProperty("robolectric.dependency.repo.id", "aliyun-public")
             }
+            // Where `SkeletonScreenshotTest` writes its renderings. Forwarded from Gradle only when
+            // actually supplied, so the documented `-Dnotdisk.screenshot.dir=...` invocation produces
+            // reviewable files in the repository while an ordinary run leaves the test on its own
+            // writable default (which is what keeps it green on a CI runner).
+            providers.systemProperty("notdisk.screenshot.dir").orNull?.takeIf { it.isNotBlank() }
+                ?.let { dir -> it.systemProperty("notdisk.screenshot.dir", dir) }
         }
     }
     buildFeatures { compose = true }
@@ -42,6 +48,11 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
+    // The content cross-fade, the inline-failure expand/shrink and the progress bar's alpha are all
+    // `androidx.compose.animation`. It does arrive transitively (foundation exposes it as an `api`
+    // dependency), but a module that imports a package directly should say so: relying on someone
+    // else's `api` edge is how a dependency upgrade silently breaks a module that never declared it.
+    implementation(libs.androidx.compose.animation)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.compose.ui.tooling.preview)

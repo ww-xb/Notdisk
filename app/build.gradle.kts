@@ -16,8 +16,8 @@ android {
         // Android 15+ only. See `build-logic/.../ProjectExtensions.kt` for why the floor is 35.
         minSdk = 35
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

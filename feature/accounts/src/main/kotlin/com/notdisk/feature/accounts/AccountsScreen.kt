@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -174,6 +175,11 @@ fun AccountsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
+            // The nav host hands this destination a zero inset (see `NotDiskNavHost`), because the
+            // file browser owns its own `TopAppBar` padding. This screen has no app bar of its own,
+            // so without this the first section header ("已连接的账号") is drawn underneath the
+            // status bar. Reached from 设置 → 账号 and, now, from the files tab's 去绑定账号 button.
+            .statusBarsPadding()
             .verticalScroll(rememberScrollState()),
     ) {
         state.banner?.let { banner ->

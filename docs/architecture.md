@@ -325,8 +325,18 @@ LocalIoError        Unknown
 ### 11.1 宿主导航
 
 根 `Scaffold` 的底部导航只有**两个**顶级标签：**文件**与**设置**。
-账号页不是顶级标签，入口在**设置 → 账号**（`SettingsScreen` 的「管理账号」/「去绑定」按钮
-调用 `onOpenAccounts`，导航到 `Routes.ACCOUNTS`）。
+账号页不是顶级标签，入口有两个，二者都必须真正导航到 `Routes.ACCOUNTS`：
+
+| 入口 | 位置 | 回调 |
+|---|---|---|
+| 设置页的「管理账号」/「去绑定」 | `SettingsScreen` | `onOpenAccounts` |
+| 文件页空状态的「去绑定账号」 | `FilesScreen` | `onOpenAccounts` |
+
+第二个入口是首启用户的**唯一**出路（底部栏没有账号标签），因此 `FilesRoute`/`FilesScreen` 的
+`onOpenAccounts` 是**必填参数，没有默认值**。它曾经被接到 `FilesViewModel.goHome`，而
+`FilesScreen` 又给该参数设了 `= {}` 默认值：账号管理搬到「设置 → 账号」之后，这个按钮只把
+浏览器的层级重置回首页，看起来就是「点击无效」。必填参数把这类回归从「运行时静默失效」变成
+「编译不过」。
 
 ### 11.2 首页按账号数分三级
 
@@ -368,9 +378,11 @@ Provider 可以绑定两个账号，两者都必须作为独立顶层文件夹�
 应用使用 `enableEdgeToEdge()`，窗口 inset 必须**恰好被消费一次**。因此：
 
 - 根 `Scaffold` 声明 `contentWindowInsets = WindowInsets(0, 0, 0, 0)`，只保留底部导航栏的高度；
-- 顶部 inset 由各页面自己拥有：
+- 顶部 inset 由各页面自己拥有 —— 规则是「凡是没有 `TopAppBar` 的页面，自己调 `statusBarsPadding()`」：
   - 文件页的 `TopAppBar` **自身**就应用了 `TopAppBarDefaults.windowInsets`（默认顶部为状态栏），
     因此它无需额外调用，是「自己拥有」而不是「被宿主代管」；
+  - **设置页与账号页没有 app bar**，它们的滚动 `Column` 显式调用 `statusBarsPadding()`；
+    缺了这一步，第一个分组标题会画在状态栏下面（与「顶部有点空」互为镜像的缺陷）；
   - player/preview 没有 app bar，由它们自己的顶部行显式调用 `statusBarsPadding()`；
   - 两者都额外调用 `navigationBarsPadding()`（player 的详情列、preview 的下载栏），
     因为它们隐藏了底部导航栏，否则最后一行会压在手势条下面。
@@ -392,8 +404,8 @@ padding —— 这正是「顶部有点空」的成因。
 
 - `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（实测 75,355,607–76,363,289 bytes，
   `applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`）；
-- **393 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `core:network` 33 ·
-  `feature:player` 32 · `core:designsystem` 28 · `feature:files` 43 · `core:data` 17 ·
+- **399 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `feature:files` 49 ·
+  `core:network` 33 · `feature:player` 32 · `core:designsystem` 28 · `core:data` 17 ·
   `feature:settings` 8 · `feature:accounts` 7 · `feature:preview` 7）；
 - 真实账号联调**未进行**，原因与清单见 [`docs/api-mapping.md`](api-mapping.md) §10。
 

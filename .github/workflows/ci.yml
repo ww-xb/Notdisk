@@ -74,6 +74,12 @@ jobs:
       contents: write
 
     steps:
+      # The release job runs on a fresh runner and had no checkout, which is why it previously could
+      # not read anything from the repository. Both the notes file and the `git describe` in the
+      # compare link need a working tree, so this step is required — not decorative.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       # 独立 job 拿不到 build job 的构建产物，从 artifact 取回。
       - name: Download built APK
         uses: actions/download-artifact@v4
@@ -89,35 +95,48 @@ jobs:
         id: apk
         run: echo "path=$(find apk -name '*.apk' | head -1)" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # 发布说明来自仓库里维护的 RELEASE_NOTES.md，而不是写死在工作流里。
+      # 之前每个版本的说明都是硬编码的 echo，一旦忘记改，v0.2.1 的 release 会原样复述 v0.2.0
+      # 的要点 —— 一份与代码不符的发布说明比没有说明更糟。哈希与来源 commit 由 CI 现场生成，
+      # 因为它们只有在构建完成后才知道。
+      - name: Compose release notes
         run: |
           apk="${{ steps.apk.outputs.path }}"
           name="Notdisk-v${{ steps.ver.outputs.version }}.apk"
           cp "$apk" "$name"
           sha=$(sha256sum "$name" | cut -d' ' -f1)
+          echo "RELEASE_ASSET=$name" >> "$GITHUB_ENV"
           {
-            echo "## Notdisk v${{ steps.ver.outputs.version }}"
+            if [ -f RELEASE_NOTES.md ]; then
+              cat RELEASE_NOTES.md
+            else
+              echo "## Notdisk v${{ steps.ver.outputs.version }}"
+            fi
             echo
-            echo "下载 \`$name\`（debug 签名，**Android 15+ / minSdk 35**）。"
+            echo "---"
             echo
-            echo "SHA-256：\`$sha\`"
+            echo "### 构建信息"
             echo
-            echo "本版本要点："
-            echo
-            echo "- 移除内置的模拟/演示网盘账号，所有内容只来自用户绑定的真实网盘"
-            echo "- 首页按账号数量分流：1 个账号直接显示该网盘内容，2 个及以上以网盘名作为顶层文件夹"
-            echo "- 115 支持直接粘贴 Cookie 登录（先校验、后写入加密存储）"
-            echo "- 账号管理从底部标签移到「设置 → 账号」"
-            echo "- 返回键改为返回上层文件夹，而不是退出应用"
-            echo "- 修复 18:9 及以上屏幕的顶部空白，全面沉浸式（edge-to-edge）"
-            echo
-            echo "由 CI 自动构建发布，来源 commit：\`${GITHUB_SHA}\`。"
-            echo
-            echo "变更内容见 [commits](https://github.com/${GITHUB_REPOSITORY}/compare/$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo 'v0.1.0')...${GITHUB_REF_NAME})。"
+            echo "- 产物：\`$name\`（debug 签名，**Android 15+ / minSdk 35**）"
+            echo "- SHA-256：\`$sha\`"
+            echo "- 来源 commit：\`${GITHUB_SHA}\`"
+            echo "- 由 CI 自动构建发布；上游提交见 [commits](https://github.com/${GITHUB_REPOSITORY}/compare/$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo 'v0.1.0')...${GITHUB_REF_NAME})。"
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" "$name" \
+          cat notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The APK path is carried in `GITHUB_ENV` by the step that produced it, so this step cannot
+          # reference a variable it never defined. `RELEASE_ASSET` is the renamed file, not the
+          # downloaded build output.
+          gh release create "$GITHUB_REF_NAME" "$RELEASE_ASSET" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Notdisk v${{ steps.ver.outputs.version }}" \
             --notes-file notes.md
+          # Verify what GitHub actually accepted against the local artifact: a release that exists but
+          # whose asset failed to upload is a "green CI, broken download" that only a user discovers.
+          echo "--- published assets ---"
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "\(.name)  \(.size) bytes"'

@@ -165,6 +165,12 @@ fun NotDiskNavHost(
                     onOpenPreview = { providerId, accountId, fileId ->
                         navController.navigate(Routes.preview(providerId, accountId, fileId))
                     },
+                    // The first-run route to the account manager. The files tab is where a user with
+                    // no account lands, and the bottom bar has no accounts tab, so this callback is
+                    // the *only* way to reach the login screen from that screen: it used to be a
+                    // ViewModel call that merely reset the browser's own level, which made
+                    // "去绑定账号" appear to do nothing at all.
+                    onOpenAccounts = { navController.navigate(Routes.ACCOUNTS) },
                 )
             }
 
@@ -282,4 +288,4 @@ private fun NavHostController.navigateToTopLevel(route: String) {
  * link the two — there is no generated symbol to reference, which is the whole point of disabling
  * build-config — so the coupling is stated here rather than left implicit.
  */
-private const val APP_VERSION = "0.2.0"
+private const val APP_VERSION = "0.2.1"

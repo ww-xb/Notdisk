@@ -123,6 +123,8 @@ class FilesScreenTest {
         onOpenFolder: (FileItem) -> Unit = {},
         onRefresh: () -> Unit = {},
         onCreateFolder: (String) -> Unit = {},
+        onOpenAccounts: () -> Unit = {},
+        onDismissError: () -> Unit = {},
     ) {
         composeRule.setContent {
             NotDiskTheme(themeMode = ThemeMode.LIGHT, dynamicColor = false) {
@@ -138,9 +140,10 @@ class FilesScreenTest {
                     onDelete = {},
                     onSetSort = { _, _ -> },
                     onToggleViewMode = {},
-                    onDismissError = {},
+                    onDismissError = onDismissError,
                     onOpenMedia = { _, _, _ -> },
                     onOpenPreview = { _, _, _ -> },
+                    onOpenAccounts = onOpenAccounts,
                 )
             }
         }
@@ -168,6 +171,66 @@ class FilesScreenTest {
         // An empty *account list* must not be reported as an empty folder: the two are different
         // situations with different remedies.
         composeRule.onNodeWithText("这个文件夹是空的", substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * The first-run screen's only button must actually reach the account manager.
+     *
+     * This is the regression test for the reported "去绑定账号 点击无效". The button was wired to a
+     * defaulted no-op (`onGoHome = {}`), so it rendered, looked enabled, and did nothing — the exact
+     * failure mode this test would have caught: it asserts the *callback fires*, not merely that the
+     * affordance exists.
+     */
+    @Test
+    fun `the bind-account action reports that accounts must be opened`() {
+        var opened = false
+        render(
+            state(
+                level = ScreenLevel.EMPTY,
+                knownAccounts = emptyList(),
+                breadcrumb = emptyList(),
+                items = emptyList(),
+            ),
+            onOpenAccounts = { opened = true },
+        )
+
+        composeRule.onNodeWithText("去绑定账号", substring = true).assertExists().performClick()
+
+        assertTrue(opened, "去绑定账号 must reach the account manager, not silently do nothing")
+    }
+
+    /**
+     * A first load must show the *list's shape*, not a blank area.
+     *
+     * The reported "请求加载时 添加加载动画 现在没有过渡动画". A folder's first load used to render a
+     * centred spinner over an otherwise empty screen; the skeleton keeps the list's footprint so the
+     * screen never looks dead and the rows do not jump when they arrive.
+     */
+    @Test
+    fun `a first load renders list placeholders with the folder's name`() {
+        render(state(isLoading = true, items = emptyList()))
+
+        composeRule.onNodeWithText("正在读取", substring = true).assertExists()
+        // The placeholders are one node to a screen reader rather than a pile of anonymous boxes.
+        composeRule.onNodeWithContentDescription("正在加载列表").assertExists()
+        // The empty state must not also be shown: two contradictory messages at once would be worse
+        // than either alone.
+        composeRule.onNodeWithText("这个文件夹是空的", substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * The skeleton must mirror the presentation the user chose.
+     *
+     * Showing list-shaped rows to someone who prefers the grid would make the content jump twice.
+     */
+    @Test
+    fun `a grid preference is honoured by the loading placeholders`() {
+        render(
+            state(isLoading = true, items = emptyList())
+                .copy(viewMode = NotDiskSettingsStore.ViewMode.GRID),
+        )
+
+        composeRule.onNodeWithContentDescription("正在加载列表").assertExists()
     }
 
     /**
@@ -281,6 +344,31 @@ class FilesScreenTest {
         // The empty state must not also be shown: two contradictory messages at once would be worse
         // than either alone.
         composeRule.onNodeWithText("这个文件夹是空的", substring = true).assertDoesNotExist()
+    }
+
+    /**
+     * A failure that arrives *while rows are visible* must be shown above them, not instead of them.
+     *
+     * The strip used to be composed after a `fillMaxSize` list, which put it below the visible area:
+     * the state was correct, the copy was correct, and the user saw nothing. This asserts the
+     * strip's text is on screen *and* that the rows it describes are still there.
+     */
+    @Test
+    fun `a failure over existing rows keeps the rows and shows the reason`() {
+        var dismissed = false
+        render(
+            state = state(
+                items = listOf(file("1", "keep-me.bin")),
+                error = "刷新失败：网络不可用",
+            ),
+            onDismissError = { dismissed = true },
+        )
+
+        composeRule.onNodeWithText("keep-me.bin", substring = true).assertExists()
+        composeRule.onNodeWithText("刷新失败", substring = true).assertIsDisplayed()
+        // ...and it is dismissible, which is the whole reason it does not replace the list.
+        composeRule.onNodeWithText("忽略", substring = true).assertExists().performClick()
+        assertTrue(dismissed, "an inline failure must be dismissible")
     }
 
     /** Paging shows a footer indicator without replacing the rows already on screen. */

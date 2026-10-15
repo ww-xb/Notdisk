@@ -178,19 +178,20 @@ gradle clean build --console=plain
 | `core:network`（超时/取消/重试/脱敏） | 33 | 0 |
 | `feature:player`（错误映射 + 刷新上限 + **架构隔离守卫**） | 32 | 0 |
 | `core:designsystem`（格式化器） | 28 | 0 |
-| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支** + **首页三级规则**） | 43 | 0 |
+| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支** + **首页三级规则** + **加载骨架与过渡**） | 49 | 0 |
 | `core:data`（播放协调器刷新语义） | 17 | 0 |
 | `feature:settings`（**Compose 能力矩阵** + **账号摘要**） | 8 | 0 |
 | `feature:accounts`（**Compose 授权状态**） | 7 | 0 |
 | `feature:preview`（**Compose 预览分支**） | 7 | 0 |
-| **合计** | **393** | **0** |
+| **合计** | **399** | **0** |
 
 > 说明：Android 模块的 `build` 会同时跑 `testDebugUnitTest` 与 `testReleaseUnitTest`，
 > 因此上表按 **debug 变体 + JVM 模块的 `test`** 去重统计，每个测试恰好计一次
 > （未去重时约 642，含每个 Android 模块跑两遍）。上表数字取自各模块
 > `build/test-results/` 下 JUnit XML 的 `tests` 属性实测值；`provider:mock` 行已随该模块删除而移除。
 >
-> `feature:files` 的 43 = `FilesScreenTest` 12 + `FilesViewModelTest` 20 + `FolderListingPolicyTest` 11。
+> `feature:files` 的 49 = `FilesScreenTest` 16 + `FilesViewModelTest` 20 + `FolderListingPolicyTest` 11
+> + `SkeletonScreenshotTest` 2（渲染骨架屏为 PNG，见 §5.4）。
 
 ### 5.1 Compose UI 测试为何用 Robolectric 而不是模拟器
 
@@ -223,9 +224,33 @@ Robolectric 在 JVM 上运行**真实的 Compose 运行时**、真实的布局�
   ViewModel 的映射函数直接断言。
 - **未验证**：Coil 图片加载、WPS 预览的 WebView、Media3 实际播放、HLS 请求头下发。
   这些需要真实设备与网络。
-- **未渲染**：`@Preview` 函数只验证了可编译（渲染需要 Android Studio）。
+- `@Preview` 函数只验证了可编译（在 Android Studio 之外渲染需要额外工具）。
 
-### 5.4 未执行的测试
+### 5.4 把界面渲染成 PNG 来复核（`SkeletonScreenshotTest`）
+
+「加载时要有过渡动画」这类验收标准，断言是**说不清楚**的：测试能证明骨架屏存在，不能证明
+它看起来像一份文件列表。因此 `feature:files` 里有一个把骨架屏真正画成 PNG 的测试：
+
+```bash
+# 产物写到仓库的 dist/screens/（该目录已被 .gitignore 忽略）
+./gradlew :feature:files:testDebugUnitTest --tests '*SkeletonScreenshotTest' \
+  -Dnotdisk.screenshot.dir=$PWD/dist/screens --console=plain
+```
+
+实测输出（`w411dp-h891dp-xhdpi`）：`list-skeleton.png`、`grid-skeleton.png`，均为 822×1782。
+复核结论写进了验收：列表骨架 10 行、网格骨架 12 格（4 行 ×3 列），都铺满一屏；网格格子是
+**正方形**（`aspectRatio(1f)`），与 `CloudFileGridTile` 的真实几何一致 —— 否则真实数据到达时
+布局仍会跳动，那正是骨架屏要消除的东西。
+
+两个实现细节值得记录，它们都是**实测**得出的而不是推断的：
+
+1. **不能用 `captureToImage()`**。它在内部调用 `waitForIdle()`，而微光是一个**无限**动画，
+   时钟永远不会 idle —— 第一版测试因此以 `ComposeTimeoutException` 失败。改为
+   `mainClock.autoAdvance = false` 手动推进时钟，再直接从 `decorView` 绘制。
+2. **截图目录不得写死绝对路径**。第一版写死了仓库路径，这会在 CI runner 上失败。现在默认写到
+   JVM 临时目录，只有显式传入 `notdisk.screenshot.dir` 时才落到仓库里。
+
+### 5.5 未执行的测试
 
 | 项 | 原因 |
 |---|---|

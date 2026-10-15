@@ -160,9 +160,14 @@ cd <项目根目录>
 gradle clean build --console=plain
 ```
 
-结果：**BUILD SUCCESSFUL**，`app-debug.apk` 产出（76,263,389 bytes，
-`applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`，读取自 AGP 生成的
-`output-metadata.json`，非猜测）。`build` 同时跑了 debug 与 release 两个变体。
+结果：**BUILD SUCCESSFUL**，`app-debug.apk` 产出（实测 75,355,607–76,363,289 bytes —— 同一提交的
+连续构建之间会有浮动，因此这里给区间而不是单值；`applicationId = com.notdisk.app`，
+`versionName = 0.2.0` / `versionCode = 2`，读取自 AGP 生成的 `output-metadata.json`，非猜测）。
+`build` 同时跑了 debug 与 release 两个变体。
+
+发布产物 `v0.2.0` 的 APK 实测 75,355,607 bytes，SHA-256
+`951bc2b19af2b733527c22f5d55402e7470aae796bf05102ecd66ecacb25948a`，与 Release notes 中记录的
+哈希一致（即「发布说明里的哈希」这一项是真实验证过的，不是自己填的）。
 
 ### 各模块测试数（去重后，每个测试计一次）
 

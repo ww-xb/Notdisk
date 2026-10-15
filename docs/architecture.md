@@ -350,22 +350,39 @@ Provider 可以绑定两个账号，两者都必须作为独立顶层文件夹�
 文件夹浏览的层级由 `FilesViewModel` 自己持有，导航图的后退栈里只有首页与 player/preview。
 因此若不拦截，位于第 3 层目录时按返回键会直接落到 Activity 并**关闭应用**。
 
-`NotDiskNavHost` 用 `BackHandler` 让浏览器优先处理：**仅当浏览器还能向上时启用**。
-`navigateUp()` 在云的根目录（`breadcrumb.size <= 1`）调用 `goHome()` —— 层次上有两个账号时回到
-网盘列表，只有一个账号时回到该账号根目录。没有上一层时（`HOME_MULTI`、`EMPTY`、单账号根目录）
-handler 处于禁用状态，交回平台行为即退出应用。不存在「总是消费返回事件」的实现，
-否则用户将无法退出。
+`FilesRoute`（不是 `NotDiskNavHost`）安装 `BackHandler`，并设
+`enabled = state.canGoUp` —— 让浏览器优先处理，但**只在自己还能向上时**拦截。
+选在 `FilesRoute` 而非宿主，是因为 ViewModel 的作用域就在这里：宿主若想拿到同一个实例必须用
+`getBackStackEntry`，而它在首帧组合时会抛异常，并且会让宿主持有第二份相互分歧的诊断状态。
+
+`canGoUp` 的判定即「上面还有没有东西」：
+- `breadcrumb.size > 1` → 上一级目录；
+- `breadcrumb.size == 1` 且已绑定账号数 ≥ 2 → `goHome()` 回到网盘列表；
+- 其余（`EMPTY`、`HOME_MULTI`、以及**只有一个账号时的该账号根目录**）→ 不拦截，交回平台行为即退出应用。
+
+单账号根目录必须是「不拦截」：那里向上会重新渲染同一个画面，既是无意义的操作，也会让用户
+无法退出应用。不存在「总是消费返回事件」的实现。
 
 ### 11.4 Edge-to-edge 的 inset 归属
 
 应用使用 `enableEdgeToEdge()`，窗口 inset 必须**恰好被消费一次**。因此：
 
 - 根 `Scaffold` 声明 `contentWindowInsets = WindowInsets(0, 0, 0, 0)`，只保留底部导航栏的高度；
-- 顶部 inset 由各页面自己拥有：文件页的 `TopAppBar` 使用 `statusBarsPadding()`；
-  player/preview 没有 app bar，由它们自己的顶部行应用 `statusBarsPadding()`。
+- 顶部 inset 由各页面自己拥有：
+  - 文件页的 `TopAppBar` **自身**就应用了 `TopAppBarDefaults.windowInsets`（默认顶部为状态栏），
+    因此它无需额外调用，是「自己拥有」而不是「被宿主代管」；
+  - player/preview 没有 app bar，由它们自己的顶部行显式调用 `statusBarsPadding()`；
+  - 两者都额外调用 `navigationBarsPadding()`（player 的详情列、preview 的下载栏），
+    因为它们隐藏了底部导航栏，否则最后一行会压在手势条下面。
 
-此前宿主消费了状态栏 inset，而 `feature:files` 的嵌套 `Scaffold` 又叠加了一次 app bar 的 inset，
-这正是屏幕上出现空白带的成因。
+为什么必须显式声明为零：Material3 的 `Scaffold` 把 `contentWindowInsets` 直接作为 content lambda
+的 padding，**不会**把底部栏高度并入其中（已反编译组合后的 `ScaffoldLayout` 核实：body 的 padding
+值直接来自 `contentWindowInsets`）。因此保留默认的 `systemBars` 时，宿主已经把状态栏高度当作顶部
+padding 交给了内层页面，而 `feature:files` 自己的 `Scaffold` 又在其上叠加了一次 `TopAppBar` 的状态栏
+padding —— 这正是「顶部有点空」的成因。
+
+底部栏不受影响：`NavigationBar` 内部自行应用 `NavigationBarDefaults.windowInsets`，所以它仍然会
+正确避让手势条。
 
 ---
 
@@ -373,7 +390,7 @@ handler 处于禁用状态，交回平台行为即退出应用。不存在「总
 
 见 [`docs/testing.md`](testing.md)。当前：
 
-- `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（约 76 MB，
+- `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（实测 75,355,607–76,363,289 bytes，
   `applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`）；
 - **393 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `core:network` 33 ·
   `feature:player` 32 · `core:designsystem` 28 · `feature:files` 43 · `core:data` 17 ·

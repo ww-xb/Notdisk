@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -61,3 +62,68 @@ jobs:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
+
+  # 打 v* tag 时自动创建 GitHub Release 并附上 APK。
+  # 依赖 build job 全绿（含全部单元测试），测试不过不会发版。
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign release APK
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: app/build/outputs/apk
+          signingKeyBase64: ${{ secrets.APK_SIGNING_KEYSTORE_BASE64 }}
+          alias: ${{ secrets.APK_SIGNING_KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.APK_SIGNING_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.APK_SIGNING_KEY_PASSWORD }}
+        # 密钥未配置时不阻塞发版——回退为发布 debug 签名 APK。
+        continue-on-error: true
+
+      - name: Pick APK to publish
+        id: apk
+        run: |
+          signed=$(find app/build/outputs/apk -name "*-signed.apk" | head -1 || true)
+          if [ -n "$signed" ]; then
+            echo "path=$signed" >> "$GITHUB_OUTPUT"
+            echo "label=signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+            echo "label=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk="${{ steps.apk.outputs.path }}"
+          name="Notdisk-v${{ steps.ver.outputs.version }}.apk"
+          cp "$apk" "$name"
+          sha=$(sha256sum "$name" | cut -d' ' -f1)
+          {
+            echo "## Notdisk v${{ steps.ver.outputs.version }}"
+            echo
+            echo "下载 \`$name\`（${{ steps.apk.outputs.label }} 签名，Android 8.0+ / minSdk 26）。"
+            echo
+            echo "SHA-256：\`$sha\`"
+            echo
+            echo "由 CI 自动构建发布，来源 commit：\`${GITHUB_SHA}\`。"
+            echo
+            echo "变更内容见 [commits](https://github.com/${GITHUB_REPOSITORY}/compare/$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo 'v0.1.0')...${GITHUB_REF_NAME})。"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" "$name" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Notdisk v${{ steps.ver.outputs.version }}" \
+            --notes-file notes.md

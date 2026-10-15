@@ -10,15 +10,16 @@ android {
 
     testOptions {
         unitTests.all {
-            // Robolectric downloads its `android-all` runtime jar through its OWN resolver, which does
-            // not consult the Gradle repositories — so in an environment where Maven Central is
-            // blocked it fails even though the artifact is reachable from the configured mirror.
-            // `robolectric.dependency.repo.url` is the documented override.
-            it.systemProperty(
-                "robolectric.dependency.repo.url",
-                "https://maven.aliyun.com/repository/public",
-            )
-            it.systemProperty("robolectric.dependency.repo.id", "aliyun-public")
+            // Robolectric downloads its `android-all` runtime jar through its OWN resolver, which
+            // does not consult the Gradle repositories. Only pin the Aliyun mirror on restricted
+            // networks (NOTDISK_MAVEN_MIRROR=aliyun); elsewhere use the default Maven Central.
+            if (providers.environmentVariable("NOTDISK_MAVEN_MIRROR").orNull == "aliyun") {
+                it.systemProperty(
+                    "robolectric.dependency.repo.url",
+                    "https://maven.aliyun.com/repository/public",
+                )
+                it.systemProperty("robolectric.dependency.repo.id", "aliyun-public")
+            }
             // Silence the "no @Config sdk" warning path and keep the run reproducible.
             it.systemProperty("robolectric.logging", "stdout")
         }

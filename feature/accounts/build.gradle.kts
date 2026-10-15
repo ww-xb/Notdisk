@@ -11,12 +11,15 @@ android {
     testOptions {
         unitTests.all {
             // Robolectric fetches its `android-all` runtime through its OWN resolver, which does not
-            // consult Gradle repositories; without this it fails where Maven Central is blocked.
-            it.systemProperty(
-                "robolectric.dependency.repo.url",
-                "https://maven.aliyun.com/repository/public",
-            )
-            it.systemProperty("robolectric.dependency.repo.id", "aliyun-public")
+            // consult Gradle repositories. Only pin the Aliyun mirror on restricted networks
+            // (NOTDISK_MAVEN_MIRROR=aliyun); everywhere else use Robolectric's default Maven Central.
+            if (providers.environmentVariable("NOTDISK_MAVEN_MIRROR").orNull == "aliyun") {
+                it.systemProperty(
+                    "robolectric.dependency.repo.url",
+                    "https://maven.aliyun.com/repository/public",
+                )
+                it.systemProperty("robolectric.dependency.repo.id", "aliyun-public")
+            }
         }
     }
     buildFeatures { compose = true }

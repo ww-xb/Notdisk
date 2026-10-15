@@ -61,4 +61,8 @@
 
 ### 测试
 
-`./gradlew test` —— **397 个测试全绿，0 失败**（修复前 393；`feature:files` 从 43 增至 47）。
+`./gradlew test` —— **399 个测试全绿，0 失败**（修复前 393；`feature:files` 从 43 增至 49）。
+
+其中 2 个是新增的 `SkeletonScreenshotTest`：它把骨架屏真正**渲染成 PNG**，因为「看起来像一份
+文件列表」这种验收标准是断言不出来的。复核方式与实测发现记在
+[`docs/testing.md`](docs/testing.md) §5.4。

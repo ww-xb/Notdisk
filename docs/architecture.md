@@ -404,7 +404,7 @@ padding —— 这正是「顶部有点空」的成因。
 
 - `gradle clean build` **BUILD SUCCESSFUL**，产出 `app-debug.apk`（实测 75,355,607–76,363,289 bytes，
   `applicationId = com.notdisk.app`，`versionName = 0.2.0` / `versionCode = 2`）；
-- **399 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `feature:files` 49 ·
+- **402 个测试全绿，0 失败**（`core:domain` 144 · `provider:p115` 74 · `feature:files` 52 ·
   `core:network` 33 · `feature:player` 32 · `core:designsystem` 28 · `core:data` 17 ·
   `feature:settings` 8 · `feature:accounts` 7 · `feature:preview` 7）；
 - 真实账号联调**未进行**，原因与清单见 [`docs/api-mapping.md`](api-mapping.md) §10。

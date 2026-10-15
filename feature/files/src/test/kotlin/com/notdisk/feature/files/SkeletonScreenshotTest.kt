@@ -10,6 +10,12 @@ import com.notdisk.core.designsystem.component.FileGridSkeleton
 import com.notdisk.core.designsystem.component.FileListSkeleton
 import com.notdisk.core.designsystem.theme.NotDiskTheme
 import com.notdisk.core.designsystem.theme.ThemeMode
+import com.notdisk.core.model.ProviderId
+import com.notdisk.core.model.FileType
+import com.notdisk.core.model.FileItem
+import com.notdisk.core.model.FileId
+import com.notdisk.core.model.CapabilitySupport
+import com.notdisk.core.model.AccountId
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -77,6 +83,62 @@ class SkeletonScreenshotTest {
         composeRule.mainClock.advanceTimeBy(shimmerSampleMs)
         dump("list-skeleton")
     }
+
+    /**
+     * The *whole screen* mid folder-entry, which is the state the user reported as harsh.
+     *
+     * Rendering the real `FilesScreen` (not just the bare skeleton) is what makes this reviewable:
+     * it shows the breadcrumb, the app bar and the placeholders together, i.e. what the user actually
+     * sees while a folder's listing is in flight. Built from the same field combination that
+     * `FilesViewModel` now publishes on arrival — see the regression test
+     * `entering a folder shows a loading state rather than an empty one` in `FilesViewModelTest`.
+     */
+    @Test
+    fun folder_entry_loading_screen_is_dumped_for_review() {
+        composeRule.mainClock.autoAdvance = false
+        composeRule.setContent {
+            NotDiskTheme(themeMode = ThemeMode.LIGHT, dynamicColor = false) {
+                FilesScreen(
+                    state = FilesUiState(
+                        providerId = ProviderId("p115"),
+                        accountId = AccountId("acct-1"),
+                        level = ScreenLevel.ACCOUNT_ROOT_SINGLE,
+                        breadcrumb = listOf(reviewFolder("root", "根目录"), reviewFolder("media", "我的文件")),
+                        // Exactly the arrival state: rows cleared, loading set.
+                        items = emptyList(),
+                        isLoading = true,
+                        capabilities = FileActionAvailability(createFolder = CapabilitySupport.SUPPORTED),
+                        providerDisplayName = "115 网盘",
+                    ),
+                    onNavigateUp = {},
+                    onOpenFolder = {},
+                    onNavigateToBreadcrumb = {},
+                    onRefresh = {},
+                    onLoadMore = {},
+                    onCreateFolder = {},
+                    onRename = { _, _ -> },
+                    onDelete = {},
+                    onSetSort = { _, _ -> },
+                    onToggleViewMode = {},
+                    onDismissError = {},
+                    onOpenMedia = { _, _, _ -> },
+                    onOpenPreview = { _, _, _ -> },
+                    onOpenAccounts = {},
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        composeRule.mainClock.advanceTimeBy(shimmerSampleMs)
+        dump("folder-entry-loading")
+    }
+
+    private fun reviewFolder(id: String, name: String) = FileItem(
+        id = FileId(id),
+        providerId = ProviderId("p115"),
+        accountId = AccountId("acct-1"),
+        name = name,
+        type = FileType.FOLDER,
+    )
 
     @Test
     fun grid_skeleton_renders_and_is_dumped_for_review() {

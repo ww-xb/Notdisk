@@ -767,13 +767,24 @@ class FilesViewModel @Inject constructor(
                 level = ScreenLevel.ACCOUNT_ROOT_SINGLE,
                 breadcrumb = chain,
                 // Clearing on arrival is what makes the loading branch reachable: the screen shows a
-                // spinner rather than another folder's contents under this folder's name.
+                // skeleton rather than another folder's contents under this folder's name.
                 items = if (isArrival) emptyList() else it.items,
                 error = null,
                 errorDetail = null,
                 nextCursor = null,
                 isLoadingMore = false,
-                isLoading = isArrival && it.items.isEmpty(),
+                // ### Why this is just `isArrival`
+                // It used to be `isArrival && it.items.isEmpty()`, which read the *previous* state's
+                // rows — and since arrival has already cleared them above, that second term could
+                // only ever *suppress* the loading flag. Navigating from a populated folder
+                // therefore published `items = []` with `isLoading = false`, which is exactly the
+                // shape of a successful empty listing: the screen rendered 「这个文件夹是空的」 for
+                // the whole provider round trip and then hard-swapped to the real rows (reported as
+                // "进入文件夹时依旧很生硬"). Going *up* had the same defect.
+                //
+                // An arrival always means "the contents of this folder are not known yet", so the
+                // loading state is not conditional on anything.
+                isLoading = isArrival,
                 isRefreshing = !isArrival,
             )
         }

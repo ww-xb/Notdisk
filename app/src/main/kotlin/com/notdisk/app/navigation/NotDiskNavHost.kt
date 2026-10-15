@@ -288,4 +288,4 @@ private fun NavHostController.navigateToTopLevel(route: String) {
  * link the two — there is no generated symbol to reference, which is the whole point of disabling
  * build-config — so the coupling is stated here rather than left implicit.
  */
-private const val APP_VERSION = "0.2.1"
+private const val APP_VERSION = "0.2.2"

@@ -178,20 +178,20 @@ gradle clean build --console=plain
 | `core:network`（超时/取消/重试/脱敏） | 33 | 0 |
 | `feature:player`（错误映射 + 刷新上限 + **架构隔离守卫**） | 32 | 0 |
 | `core:designsystem`（格式化器） | 28 | 0 |
-| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支** + **首页三级规则** + **加载骨架与过渡**） | 49 | 0 |
+| `feature:files`（**陈旧响应丢弃** + 分页终止 + **Compose 状态分支** + **首页三级规则** + **加载骨架与过渡**） | 52 | 0 |
 | `core:data`（播放协调器刷新语义） | 17 | 0 |
 | `feature:settings`（**Compose 能力矩阵** + **账号摘要**） | 8 | 0 |
 | `feature:accounts`（**Compose 授权状态**） | 7 | 0 |
 | `feature:preview`（**Compose 预览分支**） | 7 | 0 |
-| **合计** | **399** | **0** |
+| **合计** | **402** | **0** |
 
 > 说明：Android 模块的 `build` 会同时跑 `testDebugUnitTest` 与 `testReleaseUnitTest`，
 > 因此上表按 **debug 变体 + JVM 模块的 `test`** 去重统计，每个测试恰好计一次
 > （未去重时约 642，含每个 Android 模块跑两遍）。上表数字取自各模块
 > `build/test-results/` 下 JUnit XML 的 `tests` 属性实测值；`provider:mock` 行已随该模块删除而移除。
 >
-> `feature:files` 的 49 = `FilesScreenTest` 16 + `FilesViewModelTest` 20 + `FolderListingPolicyTest` 11
-> + `SkeletonScreenshotTest` 2（渲染骨架屏为 PNG，见 §5.4）。
+> `feature:files` 的 52 = `FilesScreenTest` 16 + `FilesViewModelTest` 22 + `FolderListingPolicyTest` 11
+> + `SkeletonScreenshotTest` 3（把骨架屏与「进入文件夹」整屏渲染为 PNG，见 §5.4）。
 
 ### 5.1 Compose UI 测试为何用 Robolectric 而不是模拟器
 
@@ -237,10 +237,18 @@ Robolectric 在 JVM 上运行**真实的 Compose 运行时**、真实的布局�
   -Dnotdisk.screenshot.dir=$PWD/dist/screens --console=plain
 ```
 
-实测输出（`w411dp-h891dp-xhdpi`）：`list-skeleton.png`、`grid-skeleton.png`，均为 822×1782。
-复核结论写进了验收：列表骨架 10 行、网格骨架 12 格（4 行 ×3 列），都铺满一屏；网格格子是
-**正方形**（`aspectRatio(1f)`），与 `CloudFileGridTile` 的真实几何一致 —— 否则真实数据到达时
-布局仍会跳动，那正是骨架屏要消除的东西。
+实测输出（`w411dp-h891dp-xhdpi`），均为 822×1782：
+
+| 文件 | 内容 | 复核结论 |
+|---|---|---|
+| `list-skeleton.png` | 列表骨架 | 10 行，铺满一屏 |
+| `grid-skeleton.png` | 网格骨架 | 12 格（4 行 ×3 列），格子为**正方形**（`aspectRatio(1f)`），与 `CloudFileGridTile` 的真实几何一致 |
+| `folder-entry-loading.png` | **进入文件夹时的整屏** | 顶栏 + 面包屑（根目录 › 我的文件）+「正在读取「我的文件」…」+ 列表占位 |
+
+网格格子必须是正方形，否则真实数据到达时布局仍会跳动 —— 那正是骨架屏要消除的东西。
+
+第三张图是**整屏**（真实的 `FilesScreen`）而不是裸骨架，它才是「进入文件夹」那一刻用户看到的
+东西。它同时是 §5.5 那个缺陷的可视证据：修复前同一时刻渲染的是「这个文件夹是空的」。
 
 两个实现细节值得记录，它们都是**实测**得出的而不是推断的：
 
@@ -250,7 +258,38 @@ Robolectric 在 JVM 上运行**真实的 Compose 运行时**、真实的布局�
 2. **截图目录不得写死绝对路径**。第一版写死了仓库路径，这会在 CI runner 上失败。现在默认写到
    JVM 临时目录，只有显式传入 `notdisk.screenshot.dir` 时才落到仓库里。
 
-### 5.5 未执行的测试
+### 5.5 Compose 状态测试第三次漏掉真实缺陷：进入文件夹渲染成「空文件夹」
+
+用户第二次反馈「进入文件夹时依旧很生硬」。定位方式不是猜，而是先写一个**诊断测试**打印
+进入文件夹请求在飞行中的状态：
+
+```
+DIAG before: items=1 isLoading=false isRefreshing=false crumbs=1
+DIAG mid:    items=0 isLoading=false isRefreshing=false isEmpty=true  crumbs=2 folder=dir-a
+DIAG after:  items=1
+```
+
+`isLoading=false` 而 `items=0` —— 这正是**一次成功的空列表**的形状。屏幕因此在整个请求期间
+渲染「这个文件夹是空的」，拿到数据后再硬切成列表。这也解释了为什么第一次的 Crossfade 修复
+没有解决手感：淡入淡出是有的，但**淡入的目标内容本身是错的**。
+
+根因在 `loadChildren` 的到达分支：
+
+```kotlin
+items = if (isArrival) emptyList() else it.items,
+isLoading = isArrival && it.items.isEmpty(),   // ← `it` 是 *上一个* state
+```
+
+`items` 已在上一行被清空，所以第二个条件只会**抑制** `isLoading`，永远不会让它为真。从有内容
+的目录进入子目录时，该表达式恒为 false。**返回上一级共用这个函数，所以同样受影响。**
+
+修正即 `isLoading = isArrival`：一次到达就意味着「这个目录的内容还不知道」，不由任何条件决定。
+
+修复方式与验证：新增两个测试（进入 / 返回），断言的是**字段组合**而非单个字段 —— 单独看
+「items 为空」和「isLoading=false」各自都合理，只有组合起来才是缺陷，这正是它躲过此前所有测试的
+原因。两个测试在**还原修复后立刻失败、恢复修复后通过**（已实测，见 §6 的失败输出）。
+
+### 5.6 未执行的测试
 
 | 项 | 原因 |
 |---|---|
@@ -287,9 +326,27 @@ gradle :feature:accounts:testDebugUnitTest --console=plain
 # 只跑某个页面测试
 gradle :feature:files:testDebugUnitTest --tests '*FilesScreenTest' --console=plain -i
 
+# 把骨架屏与「进入文件夹」整屏渲染成 PNG（见 §5.4）
+gradle :feature:files:testDebugUnitTest --tests '*SkeletonScreenshotTest' \
+  -Dnotdisk.screenshot.dir=$PWD/dist/screens --console=plain
+
 # 仪器测试（需设备；本环境无法运行，见 §5.1）
 gradle :app:connectedDebugAndroidTest --console=plain
 ```
+
+---
+
+## 7. 回归测试本身也被验证过（反向验证）
+
+「新加的测试能抓住这个 bug」不是靠断言，而是**把修复还原、看它是否失败**。§5.5 的两个测试实测：
+
+```
+FilesViewModelTest > entering a folder shows a loading state rather than an empty one FAILED
+FilesViewModelTest > leaving a folder also reports loading rather than empty FAILED
+51 tests completed, 2 failed
+```
+
+恢复修复后同一命令全绿。一个在缺陷存在时也通过的测试，等于没有测试。
 
 ### 6.1 Robolectric 在本环境需要的一处配置
 

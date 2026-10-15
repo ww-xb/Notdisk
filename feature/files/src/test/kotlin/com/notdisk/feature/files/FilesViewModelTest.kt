@@ -143,6 +143,90 @@ class FilesViewModelTest {
         )
     }
 
+    /**
+     * Entering a folder must publish a *loading* state, not an empty one.
+     *
+     * This is the regression test for the reported "进入文件夹时依旧很生硬". `loadChildren` cleared
+     * `items` on arrival but computed `isLoading` from the previous state (`isArrival && it.items.isEmpty()`),
+     * so that term could only ever *suppress* the flag. Navigating from a populated folder therefore
+     * published `items = []` with `isLoading = false` — the exact shape of a successful empty listing —
+     * and the screen rendered 「这个文件夹是空的」 for the entire provider round trip before hard-swapping
+     * to the real rows.
+     *
+     * The assertion is on the *combination* of fields, because either one alone looks fine: empty items
+     * is correct for an arrival, and `isLoading = false` is correct once the answer is in. Only
+     * together do they reproduce the bug — which is why it survived the existing tests.
+     */
+    @Test
+    fun `entering a folder shows a loading state rather than an empty one`() = runTest {
+        val provider = ScriptedFileSystemProvider()
+        provider.paginate("root", pages = listOf(listOf("dir-a")))
+        provider.paginate("dir-a", pages = listOf(listOf("a-file")))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        provider.hold("dir-a", gate)
+
+        val viewModel = createViewModel(provider)
+        viewModel.open(PROVIDER_ID, ACCOUNT_ID)
+        advanceUntilIdle()
+        assertEquals(1, viewModel.state.value.items.size, "the root listing must be on screen first")
+
+        viewModel.openFolder(folderItem("dir-a", "dir-a"))
+        advanceUntilIdle()
+
+        // Mid-flight: the previous folder's rows are gone, and the screen must say "loading" — not
+        // "this folder is empty", which is a claim the app has no evidence for yet.
+        val mid = viewModel.state.value
+        assertEquals(2, mid.breadcrumb.size, "the breadcrumb must already name the folder being entered")
+        assertTrue(mid.items.isEmpty(), "the previous folder's rows must not linger under the new name")
+        assertTrue(mid.isLoading, "an arrival whose listing is still in flight must report itself as loading")
+        assertFalse(
+            mid.isEmpty,
+            "an in-flight listing must never be rendered as a successful empty folder",
+        )
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf("a-file"), viewModel.state.value.items.map { it.name })
+        assertFalse(viewModel.state.value.isLoading)
+    }
+
+    /**
+     * The same defect applied to going *up*: leaving a folder must also read as loading.
+     *
+     * `navigateUp` calls the same `loadChildren`, so it shared the bug. Asserted separately because a
+     * fix applied to one call site rather than to the shared helper is the likely regression.
+     */
+    @Test
+    fun `leaving a folder also reports loading rather than empty`() = runTest {
+        val provider = ScriptedFileSystemProvider()
+        provider.paginate("root", pages = listOf(listOf("dir-a")))
+        provider.paginate("dir-a", pages = listOf(listOf("a-file")))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        provider.hold("root", gate)
+
+        val viewModel = createViewModel(provider)
+        viewModel.open(PROVIDER_ID, ACCOUNT_ID)
+        advanceUntilIdle()
+        viewModel.openFolder(folderItem("dir-a", "dir-a"))
+        advanceUntilIdle()
+        assertEquals(listOf("a-file"), viewModel.state.value.items.map { it.name })
+
+        // Going up re-lists the root, which is held open: the rows must be replaced by a loading
+        // state, not by "this folder is empty".
+        viewModel.navigateUp()
+        advanceUntilIdle()
+
+        val mid = viewModel.state.value
+        assertTrue(mid.items.isEmpty(), "the child folder's rows must not linger in the parent")
+        assertTrue(mid.isLoading, "re-listing an ancestor is a load, not an empty folder")
+        assertFalse(mid.isEmpty, "an in-flight ancestor listing must not read as empty")
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf("dir-a"), viewModel.state.value.items.map { it.name })
+    }
+
+
     @Test
     fun `a stale failure does not replace the current folder with an error screen`() = runTest {
         val provider = ScriptedFileSystemProvider()

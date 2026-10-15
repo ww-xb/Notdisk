@@ -1,6 +1,9 @@
-## Notdisk v0.2.1
+## Notdisk v0.2.2
 
-本次修复两个由用户实测反馈的问题。产物为 debug 签名，**Android 15+ / minSdk 35**。
+本次修复三个由用户实测反馈的问题。产物为 debug 签名，**Android 15+ / minSdk 35**。
+
+> **关于「进入文件夹依旧很生硬」的补充修复**：v0.2.1 首次发布后用户反馈该问题仍在，已定位到真正的
+> 根因并修复，见下面第 3 节。第 2 节的骨架屏是必要的，但当时**淡入的目标内容本身是错的**。
 
 ### 1. 文件页「去绑定账号」点击无效 —— 已修复
 
@@ -59,10 +62,41 @@
 
 ---
 
+### 3. 进入文件夹依旧很生硬 —— 真正的根因（补充修复）
+
+第 2 节的骨架屏与淡入淡出是必要的，但**没有解决手感**：因为淡入的**目标内容本身是错的**。
+
+进入文件夹时，页面在整个网络请求期间渲染的是「**这个文件夹是空的**」—— 也就是一次成功空列表的
+提示 —— 拿到数据后再硬切成列表。所以看到的是「空文件夹提示 → 整屏列表」这种跳变。
+
+定位方式不是猜，而是先写一个诊断测试打印请求飞行中的状态：
+
+```
+DIAG before: items=1 isLoading=false isRefreshing=false crumbs=1
+DIAG mid:    items=0 isLoading=false isRefreshing=false isEmpty=true  crumbs=2 folder=dir-a
+DIAG after:  items=1
+```
+
+`isLoading=false` 配 `items=0`，正是一次**成功空列表**的形状。根因在 `loadChildren` 的到达分支：
+
+```kotlin
+items = if (isArrival) emptyList() else it.items,
+isLoading = isArrival && it.items.isEmpty(),   // ← `it` 是 *上一个* state
+```
+
+`items` 已在上一行被清空，因此第二个条件只能**抑制** `isLoading`，永远不会让它为真：从有内容的
+目录进入子目录时该表达式恒为 false。**返回上一级共用这个函数，所以同样受影响。**
+
+修正即 `isLoading = isArrival` —— 一次到达就意味着「这个目录的内容还不知道」，不由任何条件决定。
+
+新增两个回归测试（进入 / 返回），断言的是**字段组合**而非单个字段：单独看「items 为空」与
+「isLoading=false」各自都合理，只有组合起来才是缺陷 —— 这正是它躲过此前所有测试的原因。
+两个测试都已**反向验证**：还原修复即刻失败，恢复修复即通过。
+
 ### 测试
 
-`./gradlew test` —— **399 个测试全绿，0 失败**（修复前 393；`feature:files` 从 43 增至 49）。
+`./gradlew test` —— **402 个测试全绿，0 失败**（v0.2.0 为 393；`feature:files` 从 43 增至 52）。
 
-其中 2 个是新增的 `SkeletonScreenshotTest`：它把骨架屏真正**渲染成 PNG**，因为「看起来像一份
-文件列表」这种验收标准是断言不出来的。复核方式与实测发现记在
-[`docs/testing.md`](docs/testing.md) §5.4。
+其中 3 个是 `SkeletonScreenshotTest`：它把骨架屏与「进入文件夹」的**整屏**真正渲染成 PNG，
+因为「看起来像一份文件列表」这种验收标准是断言不出来的。复核方式、三张图的结论与实测发现
+记在 [`docs/testing.md`](docs/testing.md) §5.4。

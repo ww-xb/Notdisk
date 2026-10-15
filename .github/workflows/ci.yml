@@ -74,35 +74,20 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # 独立 job 拿不到 build job 的构建产物，从 artifact 取回。
+      - name: Download built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: app-debug
+          path: apk
 
       - name: Derive version from tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Sign release APK
-        uses: r0adkll/sign-android-release@v1
-        with:
-          releaseDirectory: app/build/outputs/apk
-          signingKeyBase64: ${{ secrets.APK_SIGNING_KEYSTORE_BASE64 }}
-          alias: ${{ secrets.APK_SIGNING_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.APK_SIGNING_KEYSTORE_PASSWORD }}
-          keyPassword: ${{ secrets.APK_SIGNING_KEY_PASSWORD }}
-        # 密钥未配置时不阻塞发版——回退为发布 debug 签名 APK。
-        continue-on-error: true
-
       - name: Pick APK to publish
         id: apk
-        run: |
-          signed=$(find app/build/outputs/apk -name "*-signed.apk" | head -1 || true)
-          if [ -n "$signed" ]; then
-            echo "path=$signed" >> "$GITHUB_OUTPUT"
-            echo "label=signed" >> "$GITHUB_OUTPUT"
-          else
-            echo "path=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
-            echo "label=debug" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "path=$(find apk -name '*.apk' | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         env:
@@ -115,7 +100,7 @@ jobs:
           {
             echo "## Notdisk v${{ steps.ver.outputs.version }}"
             echo
-            echo "下载 \`$name\`（${{ steps.apk.outputs.label }} 签名，Android 8.0+ / minSdk 26）。"
+            echo "下载 \`$name\`（debug 签名，Android 8.0+ / minSdk 26）。"
             echo
             echo "SHA-256：\`$sha\`"
             echo

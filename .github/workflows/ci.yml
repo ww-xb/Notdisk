@@ -75,10 +75,18 @@ jobs:
 
     steps:
       # The release job runs on a fresh runner and had no checkout, which is why it previously could
-      # not read anything from the repository. Both the notes file and the `git describe` in the
-      # compare link need a working tree, so this step is required — not decorative.
+      # not read anything from the repository. Both the notes file and the `git describe` below need a
+      # working tree, so this step is required — not decorative.
+      #
+      # `fetch-depth: 0` + `fetch-tags: true` are equally required, and their absence fails *silently*:
+      # `actions/checkout@v4` defaults to a shallow, tagless clone, so `git describe` cannot find the
+      # previous tag and the `|| echo 'v0.1.0'` fallback kicks in. The result would be a compare link
+      # claiming every release is the first change since v0.1.0 — a wrong link, not a failed build.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       # 独立 job 拿不到 build job 的构建产物，从 artifact 取回。
       - name: Download built APK
